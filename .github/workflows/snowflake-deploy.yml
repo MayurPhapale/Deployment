@@ -49,7 +49,7 @@ jobs:
           if [ -d "$RELEASE_FOLDER" ]; then
             find "$RELEASE_FOLDER" -name "*.sql" | while read -r file; do 
               echo "Validating $file"
-              sqlfluff lint "$file" --dialect snowflake
+              sqlfluff lint --config .sqlfluff "$file"
             done
           else
             echo "No SQL files found in \"$RELEASE_FOLDER\""
