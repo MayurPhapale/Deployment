@@ -1,0 +1,210 @@
+# .github/workflows/snowflake-deploy.yml
+
+name: Snowflake Deployment
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+  push:
+    branches:
+      - prod_release
+
+jobs:
+  deploy_to_snowflake:
+    if: github.event.pull_request.merged == true || github.ref == 'refs/heads/prod_release'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install snowflake-connector-python sqlfluff
+      
+      - name: Validate SQL files
+        run: |
+          echo "Validating SQL files..."
+          for file in $(find . -name "*.sql"); do sqlfluff lint $file; done
+      
+      - name: Deploy to Snowflake
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          LOG_TABLE: "DEPLOYMENT_LOGS"
+        run: |
+          cat > deploy.py << 'EOL'
+          import os
+          import snowflake.connector
+          import datetime
+          import sys
+          
+          # Get environment variables
+          account = os.environ.get('SNOWFLAKE_ACCOUNT')
+          user = os.environ.get('SNOWFLAKE_USER')
+          password = os.environ.get('SNOWFLAKE_PASSWORD')
+          role = os.environ.get('SNOWFLAKE_ROLE')
+          warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE')
+          database = os.environ.get('SNOWFLAKE_DATABASE')
+          schema = os.environ.get('SNOWFLAKE_SCHEMA')
+          log_table = os.environ.get('LOG_TABLE')
+          
+          # GitHub variables
+          commit_sha = os.environ.get('GITHUB_SHA')
+          branch_name = os.environ.get('GITHUB_REF_NAME')
+          
+          # Connect to Snowflake
+          conn = snowflake.connector.connect(
+              account=account,
+              user=user,
+              password=password,
+              role=role,
+              warehouse=warehouse,
+              database=database,
+              schema=schema
+          )
+          
+          # Check if log table exists, create if not
+          cursor = conn.cursor()
+          cursor.execute(f"""
+          CREATE TABLE IF NOT EXISTS {log_table} (
+              DEPLOYMENT_ID NUMBER AUTOINCREMENT,
+              TIMESTAMP TIMESTAMP_LTZ,
+              BRANCH_NAME STRING,
+              COMMIT_SHA STRING,
+              FILE_NAME STRING,
+              STATUS STRING,
+              ERROR_MESSAGE STRING
+          )
+          """)
+          
+          # Find all SQL files
+          success = True
+          for root, dirs, files in os.walk("."):
+              for file in files:
+                  if file.endswith(".sql"):
+                      file_path = os.path.join(root, file)
+                      with open(file_path, 'r') as f:
+                          sql_content = f.read()
+                      
+                      try:
+                          print(f"Executing {file_path}...")
+                          cursor.execute(sql_content)
+                          
+                          # Log successful execution
+                          cursor.execute(f"""
+                          INSERT INTO {log_table} (
+                              TIMESTAMP, BRANCH_NAME, COMMIT_SHA, 
+                              FILE_NAME, STATUS, ERROR_MESSAGE
+                          ) VALUES (
+                              CURRENT_TIMESTAMP(), %s, %s, %s, 'SUCCESS', NULL
+                          )
+                          """, (branch_name, commit_sha, file_path))
+                          
+                      except Exception as e:
+                          error_message = str(e)
+                          print(f"Error executing {file_path}: {error_message}")
+                          
+                          # Log failed execution
+                          cursor.execute(f"""
+                          INSERT INTO {log_table} (
+                              TIMESTAMP, BRANCH_NAME, COMMIT_SHA, 
+                              FILE_NAME, STATUS, ERROR_MESSAGE
+                          ) VALUES (
+                              CURRENT_TIMESTAMP(), %s, %s, %s, 'FAILED', %s
+                          )
+                          """, (branch_name, commit_sha, file_path, error_message))
+                          
+                          success = False
+          
+          conn.close()
+          
+          if not success:
+              sys.exit(1)
+          EOL
+          python deploy.py
+          
+      - name: Generate Deployment Summary
+        if: always()
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          LOG_TABLE: "DEPLOYMENT_LOGS"
+        run: |
+          cat > log_summary.py << 'EOL'
+          import os
+          import snowflake.connector
+          
+          # Get environment variables
+          account = os.environ.get('SNOWFLAKE_ACCOUNT')
+          user = os.environ.get('SNOWFLAKE_USER')
+          password = os.environ.get('SNOWFLAKE_PASSWORD')
+          role = os.environ.get('SNOWFLAKE_ROLE')
+          warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE')
+          database = os.environ.get('SNOWFLAKE_DATABASE')
+          schema = os.environ.get('SNOWFLAKE_SCHEMA')
+          log_table = os.environ.get('LOG_TABLE')
+          commit_sha = os.environ.get('GITHUB_SHA')
+          
+          # Connect to Snowflake
+          conn = snowflake.connector.connect(
+              account=account,
+              user=user,
+              password=password,
+              role=role,
+              warehouse=warehouse,
+              database=database,
+              schema=schema
+          )
+          
+          cursor = conn.cursor()
+          cursor.execute(f"""
+          SELECT FILE_NAME, STATUS, ERROR_MESSAGE 
+          FROM {log_table} 
+          WHERE COMMIT_SHA = '{commit_sha}'
+          ORDER BY TIMESTAMP DESC
+          """)
+          
+          rows = cursor.fetchall()
+          
+          print("Deployment Log Summary:")
+          print("----------------------")
+          
+          success_count = 0
+          failure_count = 0
+          
+          for row in rows:
+              file_name, status, error = row
+              if status == 'SUCCESS':
+                  success_count += 1
+                  print(f"✅ {file_name}: SUCCESS")
+              else:
+                  failure_count += 1
+                  print(f"❌ {file_name}: FAILED - {error}")
+          
+          print("----------------------")
+          print(f"Total: {len(rows)} files processed")
+          print(f"Successful: {success_count}")
+          print(f"Failed: {failure_count}")
+          
+          conn.close()
+          EOL
+          python log_summary.py
