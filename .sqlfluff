@@ -1,9 +1,5 @@
 [sqlfluff]
 dialect = snowflake
 
-[rules]
-# Ignore indentation rules
-layout.indent = ignore
-
-[rules.capitalisation.keywords]
-capitalisation_policy = auto
+[lint]
+exclude_rules = LT02, RF04, CP01
