@@ -1,5 +1,3 @@
-# .github/workflows/snowflake-deploy.yml
-
 name: Snowflake Deployment
 
 on:
@@ -10,7 +8,7 @@ on:
 
 jobs:
   deploy_to_snowflake:
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'prod_release'
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'prod_release')
     runs-on: ubuntu-latest
     
     steps:
@@ -30,14 +28,14 @@ jobs:
       - name: Find latest release folder
         id: find_folder
         run: |
-          # Look for release folders in the Production Releases directory
-          if [ -d "Production Releases" ]; then
-            latest_folder=$(ls -d "Production Releases"/prod_release* 2>/dev/null | sort -r | head -n 1)
+          RELEASE_DIR="Production Releases"
+          if [ -d "$RELEASE_DIR" ]; then
+            latest_folder=$(ls -d "$RELEASE_DIR"/prod_release* 2>/dev/null | sort -r | head -n 1)
             if [ -n "$latest_folder" ]; then
               echo "RELEASE_FOLDER=$latest_folder" >> $GITHUB_ENV
               echo "Found latest release folder: $latest_folder"
             else
-              echo "No release folders found in Production Releases directory"
+              echo "No release folders found in $RELEASE_DIR"
               exit 1
             fi
           else
@@ -47,14 +45,14 @@ jobs:
       
       - name: Validate SQL files
         run: |
-          echo "Validating SQL files in $RELEASE_FOLDER..."
+          echo "Validating SQL files in \"$RELEASE_FOLDER\"..."
           if [ -d "$RELEASE_FOLDER" ]; then
-            for file in $(find "$RELEASE_FOLDER" -name "*.sql"); do 
+            find "$RELEASE_FOLDER" -name "*.sql" | while read -r file; do 
               echo "Validating $file"
               sqlfluff lint "$file" --dialect snowflake
             done
           else
-            echo "No SQL files found in $RELEASE_FOLDER"
+            echo "No SQL files found in \"$RELEASE_FOLDER\""
             exit 1
           fi
       
@@ -228,22 +226,9 @@ jobs:
           print(f"Deployment Log Summary for {release_name}:")
           print("----------------------------------------")
           
-          success_count = 0
-          failure_count = 0
-          
           for row in rows:
               file_name, status, error = row
-              if status == 'SUCCESS':
-                  success_count += 1
-                  print(f"✅ {file_name}: SUCCESS")
-              else:
-                  failure_count += 1
-                  print(f"❌ {file_name}: FAILED - {error}")
-          
-          print("----------------------------------------")
-          print(f"Total: {len(rows)} files processed")
-          print(f"Successful: {success_count}")
-          print(f"Failed: {failure_count}")
+              print(f"✅ {file_name}: SUCCESS" if status == 'SUCCESS' else f"❌ {file_name}: FAILED - {error}")
           
           conn.close()
           EOL
