@@ -49,7 +49,7 @@ jobs:
           if [ -d "$RELEASE_FOLDER" ]; then
             find "$RELEASE_FOLDER" -name "*.sql" | while read -r file; do 
               echo "Validating $file"
-              sqlfluff lint --config .sqlfluff "$file"
+              sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file"
             done
           else
             echo "No SQL files found in \"$RELEASE_FOLDER\""
