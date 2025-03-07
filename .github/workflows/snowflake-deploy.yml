@@ -33,7 +33,7 @@ jobs:
       - name: Validate SQL files
         run: |
           echo "Validating SQL files..."
-          for file in $(find . -name "*.sql"); do sqlfluff lint $file; done
+          for file in $(find . -name "*.sql"); do sqlfluff lint $file --dialect snowflake; done
       
       - name: Deploy to Snowflake
         env:
