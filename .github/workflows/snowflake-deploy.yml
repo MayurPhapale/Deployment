@@ -7,13 +7,10 @@ on:
     types: [closed]
     branches:
       - main
-  push:
-    branches:
-      - prod_release
 
 jobs:
   deploy_to_snowflake:
-    if: github.event.pull_request.merged == true || github.ref == 'refs/heads/prod_release'
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'prod_release'
     runs-on: ubuntu-latest
     
     steps:
