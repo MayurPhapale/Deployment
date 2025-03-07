@@ -55,7 +55,7 @@ jobs:
             echo "No SQL files found in \"$RELEASE_FOLDER\""
             exit 1
           fi
-      
+          
       - name: Deploy to Snowflake
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -74,7 +74,7 @@ jobs:
           import datetime
           import sys
           import glob
-          
+
           # Get environment variables
           account = os.environ.get('SNOWFLAKE_ACCOUNT')
           user = os.environ.get('SNOWFLAKE_USER')
@@ -85,14 +85,14 @@ jobs:
           schema = os.environ.get('SNOWFLAKE_SCHEMA')
           log_table = os.environ.get('LOG_TABLE')
           release_folder = os.environ.get('RELEASE_FOLDER')
-          
+
           # GitHub variables
           commit_sha = os.environ.get('GITHUB_SHA')
           branch_name = os.environ.get('GITHUB_REF_NAME')
           release_name = os.path.basename(release_folder)
-          
+
           print(f"Processing files from release folder: {release_folder}")
-          
+
           # Connect to Snowflake
           conn = snowflake.connector.connect(
               account=account,
@@ -103,7 +103,7 @@ jobs:
               database=database,
               schema=schema
           )
-          
+
           # Check if log table exists, create if not
           cursor = conn.cursor()
           cursor.execute(f"""
@@ -118,55 +118,65 @@ jobs:
               ERROR_MESSAGE STRING
           )
           """)
-          
+
+          # Find the current maximum DEPLOYMENT_ID
+          cursor.execute(f"SELECT MAX(DEPLOYMENT_ID) FROM {log_table}")
+          result = cursor.fetchone()
+
+          # Start deployment_id from 1 if no records, else increment max DEPLOYMENT_ID
+          deployment_id = 1 if result[0] is None else result[0] + 1
+
           # Find all SQL files in the release folder
           sql_files = glob.glob(f"{release_folder}/**/*.sql", recursive=True)
           sql_files.sort()  # Sort files to ensure consistent execution order
-          
+
           if not sql_files:
               print(f"No SQL files found in {release_folder}")
               sys.exit(1)
-              
+
           print(f"Found {len(sql_files)} SQL files to process")
-          
+
           # Process SQL files
           success = True
           for file_path in sql_files:
               with open(file_path, 'r') as f:
                   sql_content = f.read()
-              
+
               try:
                   print(f"Executing {file_path}...")
                   cursor.execute(sql_content)
-                  
-                  # Log successful execution
+
+                  # Log successful execution with sequential DEPLOYMENT_ID
                   cursor.execute(f"""
                   INSERT INTO {log_table} (
-                      TIMESTAMP, BRANCH_NAME, RELEASE_NAME, COMMIT_SHA, 
+                      DEPLOYMENT_ID, TIMESTAMP, BRANCH_NAME, RELEASE_NAME, COMMIT_SHA, 
                       FILE_NAME, STATUS, ERROR_MESSAGE
                   ) VALUES (
-                      CURRENT_TIMESTAMP(), %s, %s, %s, %s, 'SUCCESS', NULL
+                      {deployment_id}, CURRENT_TIMESTAMP(), %s, %s, %s, %s, 'SUCCESS', NULL
                   )
                   """, (branch_name, release_name, commit_sha, file_path))
-                  
+
               except Exception as e:
                   error_message = str(e)
                   print(f"Error executing {file_path}: {error_message}")
-                  
-                  # Log failed execution
+
+                  # Log failed execution with sequential DEPLOYMENT_ID
                   cursor.execute(f"""
                   INSERT INTO {log_table} (
-                      TIMESTAMP, BRANCH_NAME, RELEASE_NAME, COMMIT_SHA, 
+                      DEPLOYMENT_ID, TIMESTAMP, BRANCH_NAME, RELEASE_NAME, COMMIT_SHA, 
                       FILE_NAME, STATUS, ERROR_MESSAGE
                   ) VALUES (
-                      CURRENT_TIMESTAMP(), %s, %s, %s, %s, 'FAILED', %s
+                      {deployment_id}, CURRENT_TIMESTAMP(), %s, %s, %s, %s, 'FAILED', %s
                   )
                   """, (branch_name, release_name, commit_sha, file_path, error_message))
-                  
+
                   success = False
-          
+
+              # Increment deployment_id for the next log
+              deployment_id += 1
+
           conn.close()
-          
+
           if not success:
               sys.exit(1)
           EOL
@@ -188,7 +198,7 @@ jobs:
           cat > log_summary.py << 'EOL'
           import os
           import snowflake.connector
-          
+
           # Get environment variables
           account = os.environ.get('SNOWFLAKE_ACCOUNT')
           user = os.environ.get('SNOWFLAKE_USER')
@@ -201,7 +211,7 @@ jobs:
           commit_sha = os.environ.get('GITHUB_SHA')
           release_folder = os.environ.get('RELEASE_FOLDER')
           release_name = os.path.basename(release_folder)
-          
+
           # Connect to Snowflake
           conn = snowflake.connector.connect(
               account=account,
@@ -212,7 +222,7 @@ jobs:
               database=database,
               schema=schema
           )
-          
+
           cursor = conn.cursor()
           cursor.execute(f"""
           SELECT FILE_NAME, STATUS, ERROR_MESSAGE 
@@ -220,16 +230,16 @@ jobs:
           WHERE COMMIT_SHA = '{commit_sha}' AND RELEASE_NAME = '{release_name}'
           ORDER BY TIMESTAMP DESC
           """)
-          
+
           rows = cursor.fetchall()
-          
+
           print(f"Deployment Log Summary for {release_name}:")
           print("----------------------------------------")
-          
+
           for row in rows:
               file_name, status, error = row
               print(f"✅ {file_name}: SUCCESS" if status == 'SUCCESS' else f"❌ {file_name}: FAILED - {error}")
-          
+
           conn.close()
           EOL
           python log_summary.py
