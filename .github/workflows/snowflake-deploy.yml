@@ -14,7 +14,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        
+        with:
+          fetch-depth: 0  # Fetch full commit history
+      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -25,38 +27,29 @@ jobs:
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff
       
-      - name: Find latest release folder
-        id: find_folder
+      - name: Get changed SQL files
+        id: changed_files
         run: |
-          RELEASE_DIR="Production Releases"
-          if [ -d "$RELEASE_DIR" ]; then
-            latest_folder=$(ls -d "$RELEASE_DIR"/prod_release* 2>/dev/null | sort -r | head -n 1)
-            if [ -n "$latest_folder" ]; then
-              echo "RELEASE_FOLDER=$latest_folder" >> $GITHUB_ENV
-              echo "Found latest release folder: $latest_folder"
-            else
-              echo "No release folders found in $RELEASE_DIR"
-              exit 1
-            fi
-          else
-            echo "Production Releases directory not found"
-            exit 1
-          fi
-      
-      - name: Validate SQL files
-        run: |
-          echo "Validating SQL files in \"$RELEASE_FOLDER\"..."
-          if [ -d "$RELEASE_FOLDER" ]; then
-            find "$RELEASE_FOLDER" -name "*.sql" | while read -r file; do 
-              echo "Validating $file"
-              sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file"
-            done
-          else
-            echo "No SQL files found in \"$RELEASE_FOLDER\""
-            exit 1
-          fi
+          # Get the latest commit SHA of main
+          MAIN_SHA=$(git rev-parse origin/main)
           
-      - name: Deploy to Snowflake
+          # Get the latest commit SHA of the prod release branch
+          RELEASE_SHA=$(git rev-parse origin/${{ github.event.pull_request.head.ref }})
+          
+          # Find modified files between these commits
+          MODIFIED_FILES=$(git diff --name-only $MAIN_SHA $RELEASE_SHA | grep '\.sql$' || true)
+          
+          # Store modified files in an environment variable
+          echo "MODIFIED_FILES<<EOF" >> $GITHUB_ENV
+          echo "$MODIFIED_FILES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          # Print modified files for debugging
+          echo "Modified SQL files:"
+          echo "$MODIFIED_FILES"
+      
+      - name: Deploy changed SQL files to Snowflake
+        if: env.MODIFIED_FILES != ''
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -66,122 +59,28 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           LOG_TABLE: "DEPLOYMENT_LOGS"
-          RELEASE_FOLDER: ${{ env.RELEASE_FOLDER }}
         run: |
-          cat > deploy.py << 'EOL'
-          import os
-          import snowflake.connector
-          import datetime
-          import sys
-          import glob
-
-          # Get environment variables
-          account = os.environ.get('SNOWFLAKE_ACCOUNT')
-          user = os.environ.get('SNOWFLAKE_USER')
-          password = os.environ.get('SNOWFLAKE_PASSWORD')
-          role = os.environ.get('SNOWFLAKE_ROLE')
-          warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE')
-          database = os.environ.get('SNOWFLAKE_DATABASE')
-          schema = os.environ.get('SNOWFLAKE_SCHEMA')
-          log_table = os.environ.get('LOG_TABLE')
-          release_folder = os.environ.get('RELEASE_FOLDER')
-
-          # GitHub variables
-          commit_sha = os.environ.get('GITHUB_SHA')
-          branch_name = os.environ.get('GITHUB_REF_NAME')
-          release_name = os.path.basename(release_folder)
-
-          print(f"Processing files from release folder: {release_folder}")
-
-          # Connect to Snowflake
-          conn = snowflake.connector.connect(
-              account=account,
-              user=user,
-              password=password,
-              role=role,
-              warehouse=warehouse,
-              database=database,
-              schema=schema
-          )
-
-          # Check if log table exists, create if not
-          cursor = conn.cursor()
-          cursor.execute(f"""
-          CREATE TABLE IF NOT EXISTS {log_table} (
-              DEPLOYMENT_ID NUMBER AUTOINCREMENT,
-              TIMESTAMP TIMESTAMP_LTZ,
-              BRANCH_NAME STRING,
-              RELEASE_NAME STRING,
-              COMMIT_SHA STRING,
-              FILE_NAME STRING,
-              STATUS STRING,
-              ERROR_MESSAGE STRING
-          )
-          """)
-
-          # Find the current maximum DEPLOYMENT_ID
-          cursor.execute(f"SELECT MAX(DEPLOYMENT_ID) FROM {log_table}")
-          result = cursor.fetchone()
-
-          # Start deployment_id from 1 if no records, else increment max DEPLOYMENT_ID
-          deployment_id = 1 if result[0] is None else result[0] + 1
-
-          # Find all SQL files in the release folder
-          sql_files = glob.glob(f"{release_folder}/**/*.sql", recursive=True)
-          sql_files.sort()  # Sort files to ensure consistent execution order
-
-          if not sql_files:
-              print(f"No SQL files found in {release_folder}")
-              sys.exit(1)
-
-          print(f"Found {len(sql_files)} SQL files to process")
-
-          # Process SQL files
-          success = True
-          for file_path in sql_files:
-              with open(file_path, 'r') as f:
-                  sql_content = f.read()
-
-              try:
-                  print(f"Executing {file_path}...")
-                  cursor.execute(sql_content)
-
-                  # Log successful execution with sequential DEPLOYMENT_ID
-                  cursor.execute(f"""
-                  INSERT INTO {log_table} (
-                      DEPLOYMENT_ID, TIMESTAMP, BRANCH_NAME, RELEASE_NAME, COMMIT_SHA, 
-                      FILE_NAME, STATUS, ERROR_MESSAGE
-                  ) VALUES (
-                      {deployment_id}, CURRENT_TIMESTAMP(), %s, %s, %s, %s, 'SUCCESS', NULL
-                  )
-                  """, (branch_name, release_name, commit_sha, file_path))
-
-              except Exception as e:
-                  error_message = str(e)
-                  print(f"Error executing {file_path}: {error_message}")
-
-                  # Log failed execution with sequential DEPLOYMENT_ID
-                  cursor.execute(f"""
-                  INSERT INTO {log_table} (
-                      DEPLOYMENT_ID, TIMESTAMP, BRANCH_NAME, RELEASE_NAME, COMMIT_SHA, 
-                      FILE_NAME, STATUS, ERROR_MESSAGE
-                  ) VALUES (
-                      {deployment_id}, CURRENT_TIMESTAMP(), %s, %s, %s, %s, 'FAILED', %s
-                  )
-                  """, (branch_name, release_name, commit_sha, file_path, error_message))
-
-                  success = False
-
-              # Increment deployment_id for the next log
-              deployment_id += 1
-
-          conn.close()
-
-          if not success:
-              sys.exit(1)
-          EOL
-          python deploy.py
-          
+          echo "Deploying modified SQL files..."
+          for file in $MODIFIED_FILES; do
+            echo "Executing $file..."
+            python -c "
+            import os, snowflake.connector
+            conn = snowflake.connector.connect(
+                user=os.getenv('SNOWFLAKE_USER'),
+                password=os.getenv('SNOWFLAKE_PASSWORD'),
+                account=os.getenv('SNOWFLAKE_ACCOUNT'),
+                warehouse=os.getenv('SNOWFLAKE_WAREHOUSE'),
+                database=os.getenv('SNOWFLAKE_DATABASE'),
+                schema=os.getenv('SNOWFLAKE_SCHEMA'),
+                role=os.getenv('SNOWFLAKE_ROLE')
+            )
+            cur = conn.cursor()
+            sql_script = open('$file', 'r').read()
+            cur.execute(sql_script)
+            conn.close()
+            "
+          done
+      
       - name: Generate Deployment Summary
         if: always()
         env:
@@ -193,13 +92,11 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           LOG_TABLE: "DEPLOYMENT_LOGS"
-          RELEASE_FOLDER: ${{ env.RELEASE_FOLDER }}
         run: |
           cat > log_summary.py << 'EOL'
           import os
           import snowflake.connector
 
-          # Get environment variables
           account = os.environ.get('SNOWFLAKE_ACCOUNT')
           user = os.environ.get('SNOWFLAKE_USER')
           password = os.environ.get('SNOWFLAKE_PASSWORD')
@@ -209,10 +106,7 @@ jobs:
           schema = os.environ.get('SNOWFLAKE_SCHEMA')
           log_table = os.environ.get('LOG_TABLE')
           commit_sha = os.environ.get('GITHUB_SHA')
-          release_folder = os.environ.get('RELEASE_FOLDER')
-          release_name = os.path.basename(release_folder)
 
-          # Connect to Snowflake
           conn = snowflake.connector.connect(
               account=account,
               user=user,
@@ -222,24 +116,24 @@ jobs:
               database=database,
               schema=schema
           )
-
+          
           cursor = conn.cursor()
           cursor.execute(f"""
           SELECT FILE_NAME, STATUS, ERROR_MESSAGE 
           FROM {log_table} 
-          WHERE COMMIT_SHA = '{commit_sha}' AND RELEASE_NAME = '{release_name}'
+          WHERE COMMIT_SHA = '{commit_sha}'
           ORDER BY TIMESTAMP DESC
           """)
-
+          
           rows = cursor.fetchall()
-
-          print(f"Deployment Log Summary for {release_name}:")
+          
+          print("Deployment Log Summary:")
           print("----------------------------------------")
-
+          
           for row in rows:
               file_name, status, error = row
               print(f"✅ {file_name}: SUCCESS" if status == 'SUCCESS' else f"❌ {file_name}: FAILED - {error}")
-
+          
           conn.close()
           EOL
           python log_summary.py
