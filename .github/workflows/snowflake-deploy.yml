@@ -15,7 +15,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # Fetch all history to ensure we can get all changes
+          fetch-depth: 0  # Fetch full history to ensure we get all changes
 
       - name: Debug Branch
         run: echo "Running on branch $GITHUB_REF_NAME"
@@ -28,8 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install snowflake-connector-python sqlfluff
-          pip install jq
+          pip install snowflake-connector-python sqlfluff jq
 
       - name: Get changed files
         id: changed-files
@@ -37,27 +36,27 @@ jobs:
           echo "Getting changed files between base and head of the PR..."
           
           # Get the base and head SHAs from the PR
-          BASE_SHA=$(git rev-parse ${{ github.event.pull_request.base.sha }})
-          HEAD_SHA=$(git rev-parse ${{ github.event.pull_request.head.sha }})
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
           
           echo "Base SHA: $BASE_SHA"
           echo "Head SHA: $HEAD_SHA"
           
-          # Get all changed files between base and head
-          CHANGED_FILES=$(git diff --name-status $BASE_SHA $HEAD_SHA | grep -E '^[AM]' | awk '{print $2}')
+          # Get all changed files (added, modified, and renamed)
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA)
           
           echo "All changed files:"
           echo "$CHANGED_FILES"
           
-          # Filter for SQL files only
+          # Filter only SQL files
           SQL_FILES=$(echo "$CHANGED_FILES" | grep -E '\.sql$' || true)
           
           echo "Changed SQL files:"
           echo "$SQL_FILES"
           
-          # Save to output and file
+          # Save to output and environment variable
           echo "$SQL_FILES" > changed_files.txt
-          echo "sql_files=$SQL_FILES" >> $GITHUB_OUTPUT
+          echo "sql_files=$(echo "$SQL_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
 
       - name: Debug Changed Files
         run: |
@@ -65,7 +64,7 @@ jobs:
           cat changed_files.txt
 
       - name: Validate SQL files
-        if: ${{ steps.changed-files.outputs.sql_files != '' }}
+        if: ${{ env.sql_files != '' }}
         run: |
           echo "Validating changed SQL files..."
           if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
@@ -81,7 +80,7 @@ jobs:
           done < changed_files.txt
 
       - name: Deploy changed SQL files to Snowflake
-        if: ${{ steps.changed-files.outputs.sql_files != '' }}
+        if: ${{ env.sql_files != '' }}
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -100,6 +99,7 @@ jobs:
           import os
           import snowflake.connector
           import sys
+          
           # Get environment variables
           account = os.getenv('SNOWFLAKE_ACCOUNT')
           user = os.getenv('SNOWFLAKE_USER')
@@ -108,6 +108,7 @@ jobs:
           warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
           database = os.getenv('SNOWFLAKE_DATABASE')
           schema = os.getenv('SNOWFLAKE_SCHEMA')
+
           # Connect to Snowflake
           conn = snowflake.connector.connect(
               account=account,
@@ -119,13 +120,17 @@ jobs:
               schema=schema
           )
           cursor = conn.cursor()
+
           # Read changed SQL files
           with open("changed_files.txt", "r") as f:
               sql_files = [line.strip() for line in f.readlines() if line.strip()]
+
           if not sql_files:
               print("No SQL files to deploy. Exiting...")
               sys.exit(0)
+
           print(f"Deploying {len(sql_files)} changed SQL files...")
+
           for sql_file in sql_files:
               try:
                   with open(sql_file, "r") as f:
@@ -135,6 +140,8 @@ jobs:
               except Exception as e:
                   print(f"Error executing {sql_file}: {e}")
                   sys.exit(1)
+
           conn.close()
           EOL
+          
           python deploy.py
