@@ -1,138 +1,129 @@
 name: Snowflake Deployment
 
-on:
-  pull_request:
-    types: [closed]
-    branches:
+on:  
+  pull_request:    
+    types: [closed]    
+    branches:      
       - main
 
-jobs:
-  deploy_to_snowflake:
-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'prod_release')
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout main branch
-        uses: actions/checkout@v3
-        with:
+jobs:  
+  deploy_to_snowflake:    
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'prod_release')    
+    runs-on: ubuntu-latest        
+
+    steps:      
+      - name: Checkout main branch        
+        uses: actions/checkout@v3        
+        with:          
           ref: main
+          fetch-depth: 100  # Increased fetch depth to avoid missing previous commit SHA
 
-      - name: Debug Branch
-        run: echo "Running on branch $GITHUB_REF_NAME"
+      - name: Debug Branch        
+        run: echo "Running on branch $GITHUB_REF_NAME"      
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-          
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install snowflake-connector-python sqlfluff
-          
-      - name: Get changed files
-        id: changed-files
-        uses: tj-actions/changed-files@v35
-        with:
-          json: true
+      - name: Set up Python        
+        uses: actions/setup-python@v4        
+        with:          
+          python-version: '3.9'          
+
+      - name: Install dependencies        
+        run: |          
+          python -m pip install --upgrade pip          
+          pip install snowflake-connector-python sqlfluff          
+
+      - name: Get changed files        
+        id: changed-files        
+        uses: tj-actions/changed-files@v35        
+        with:          
+          json: true          
           since_last_remote_commit: true
+          fetch_depth: 100  # Ensure enough history for comparison
 
-      - name: Debug Changed Files Output
-        run: |
-          echo "Raw changed files output:"
-          echo '${{ steps.changed-files.outputs.all_changed_files }}'
+      - name: Debug Changed Files Output        
+        run: |          
+          echo "Raw changed files output:"          
+          echo '${{ steps.changed-files.outputs.all_changed_files }}'      
 
-      - name: Filter changed SQL files
-        id: filter-sql-files
-        run: |
-          echo "Filtering changed SQL files..."
-          FILES_JSON='${{ steps.changed-files.outputs.all_changed_files }}'
+      - name: Filter changed SQL files        
+        id: filter-sql-files        
+        run: |          
+          echo "Filtering changed SQL files..."          
+          FILES_JSON='${{ steps.changed-files.outputs.all_changed_files }}'          
+          if [[ -z "$FILES_JSON" || "$FILES_JSON" == "[]" ]]; then            
+            echo "No changed files detected. Exiting..."            
+            exit 0          
+          fi          
+          changed_sql_files=$(echo "$FILES_JSON" | jq -r '.[] | select(endswith(".sql"))')          
+          if [ -z "$changed_sql_files" ]; then            
+            echo "No changed SQL files found. Exiting..."            
+            exit 0          
+          fi          
+          echo "$changed_sql_files" > changed_files.txt          
+          echo "CHANGED_SQL_FILES=$(echo "$changed_sql_files" | tr '\n' ' ')" >> $GITHUB_ENV      
 
-          # Ensure valid JSON before parsing
-          if [[ -z "$FILES_JSON" || "$FILES_JSON" == "[]" ]]; then
-            echo "No changed files detected. Exiting..."
-            exit 0
-          fi
+      - name: Validate SQL files        
+        if: env.CHANGED_SQL_FILES != ''        
+        run: |          
+          echo "Validating changed SQL files..."          
+          while IFS= read -r file; do            
+            echo "Validating $file"            
+            sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file"          
+          done < changed_files.txt      
 
-          # Extract only SQL files
-          changed_sql_files=$(echo "$FILES_JSON" | jq -r '.[] | select(endswith(".sql"))')
+      - name: Deploy changed SQL files to Snowflake        
+        if: env.CHANGED_SQL_FILES != ''        
+        env:          
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}          
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}          
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}          
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}          
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}          
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}          
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}        
+        run: |          
+          cat > deploy.py << 'EOL'          
+          import os          
+          import snowflake.connector          
+          import sys          
 
-          if [ -z "$changed_sql_files" ]; then
-            echo "No changed SQL files found. Exiting..."
-            exit 0
-          fi
+          account = os.getenv('SNOWFLAKE_ACCOUNT')          
+          user = os.getenv('SNOWFLAKE_USER')          
+          password = os.getenv('SNOWFLAKE_PASSWORD')          
+          role = os.getenv('SNOWFLAKE_ROLE')          
+          warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')          
+          database = os.getenv('SNOWFLAKE_DATABASE')          
+          schema = os.getenv('SNOWFLAKE_SCHEMA')          
 
-          echo "$changed_sql_files" > changed_files.txt
-          echo "CHANGED_SQL_FILES=$(echo "$changed_sql_files" | tr '\n' ' ')" >> $GITHUB_ENV
+          conn = snowflake.connector.connect(              
+              account=account,              
+              user=user,              
+              password=password,              
+              role=role,              
+              warehouse=warehouse,              
+              database=database,              
+              schema=schema          
+          )          
+          cursor = conn.cursor()          
 
-      - name: Validate SQL files
-        if: env.CHANGED_SQL_FILES != ''
-        run: |
-          echo "Validating changed SQL files..."
-          while IFS= read -r file; do
-            echo "Validating $file"
-            sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file"
-          done < changed_files.txt
-          
-      - name: Deploy changed SQL files to Snowflake
-        if: env.CHANGED_SQL_FILES != ''
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
-          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
-        run: |
-          cat > deploy.py << 'EOL'
-          import os
-          import snowflake.connector
-          import sys
-          
-          # Get environment variables
-          account = os.getenv('SNOWFLAKE_ACCOUNT')
-          user = os.getenv('SNOWFLAKE_USER')
-          password = os.getenv('SNOWFLAKE_PASSWORD')
-          role = os.getenv('SNOWFLAKE_ROLE')
-          warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
-          database = os.getenv('SNOWFLAKE_DATABASE')
-          schema = os.getenv('SNOWFLAKE_SCHEMA')
-          
-          # Connect to Snowflake
-          conn = snowflake.connector.connect(
-              account=account,
-              user=user,
-              password=password,
-              role=role,
-              warehouse=warehouse,
-              database=database,
-              schema=schema
-          )
-          cursor = conn.cursor()
-          
-          # Read changed SQL files
-          with open("changed_files.txt", "r") as f:
-              sql_files = [line.strip() for line in f.readlines()]
-          
-          if not sql_files:
-              print("No SQL files to deploy. Exiting...")
-              sys.exit(0)
-          
-          print(f"Deploying {len(sql_files)} changed SQL files...")
-          
-          for sql_file in sql_files:
-              try:
-                  with open(sql_file, "r") as f:
-                      sql_content = f.read()
-                  
-                  print(f"Executing {sql_file}...")
-                  cursor.execute(sql_content)
-              except Exception as e:
-                  print(f"Error executing {sql_file}: {e}")
-                  sys.exit(1)
-          
-          conn.close()
-          EOL
-          
+          with open("changed_files.txt", "r") as f:              
+              sql_files = [line.strip() for line in f.readlines()]              
+
+          if not sql_files:              
+              print("No SQL files to deploy. Exiting...")              
+              sys.exit(0)              
+
+          print(f"Deploying {len(sql_files)} changed SQL files...")              
+
+          for sql_file in sql_files:              
+              try:                  
+                  with open(sql_file, "r") as f:                      
+                      sql_content = f.read()                  
+                  print(f"Executing {sql_file}...")                  
+                  cursor.execute(sql_content)              
+              except Exception as e:                  
+                  print(f"Error executing {sql_file}: {e}")                  
+                  sys.exit(1)              
+
+          conn.close()          
+          EOL          
           python deploy.py
