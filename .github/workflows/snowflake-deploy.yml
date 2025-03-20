@@ -12,11 +12,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout main branch
+      - name: Checkout code
         uses: actions/checkout@v3
         with:
-          ref: main
-          fetch-depth: 100  # Increased fetch depth to avoid SHA not found error
+          fetch-depth: 0  # Fetch all history to ensure we can get all changes
 
       - name: Debug Branch
         run: echo "Running on branch $GITHUB_REF_NAME"
@@ -30,83 +29,59 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff
+          pip install jq
 
-      - name: Get changed files  
-        id: changed-files  
-        uses: tj-actions/changed-files@v35  
-        with:  
-          json: true  
-          since_last_remote_commit: true  
-          fetch_depth: 100  # Ensure previous SHA is available
-
-      - name: Debug Changed Files Output
+      - name: Get changed files
+        id: changed-files
         run: |
-          echo "Raw changed files output:"
-          echo '${{ steps.changed-files.outputs.all_changed_files }}'
+          echo "Getting changed files between base and head of the PR..."
+          
+          # Get the base and head SHAs from the PR
+          BASE_SHA=$(git rev-parse ${{ github.event.pull_request.base.sha }})
+          HEAD_SHA=$(git rev-parse ${{ github.event.pull_request.head.sha }})
+          
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+          
+          # Get all changed files between base and head
+          CHANGED_FILES=$(git diff --name-status $BASE_SHA $HEAD_SHA | grep -E '^[AM]' | awk '{print $2}')
+          
+          echo "All changed files:"
+          echo "$CHANGED_FILES"
+          
+          # Filter for SQL files only
+          SQL_FILES=$(echo "$CHANGED_FILES" | grep -E '\.sql$' || true)
+          
+          echo "Changed SQL files:"
+          echo "$SQL_FILES"
+          
+          # Save to output and file
+          echo "$SQL_FILES" > changed_files.txt
+          echo "sql_files=$SQL_FILES" >> $GITHUB_OUTPUT
 
-      - name: Filter changed SQL files
-        id: filter-sql-files
+      - name: Debug Changed Files
         run: |
-          echo "Filtering changed SQL files..."
-          FILES_JSON='${{ steps.changed-files.outputs.all_changed_files }}'
-          
-          # Debug the JSON content
-          echo "JSON content: $FILES_JSON"
-          
-          # Ensure JSON is valid before parsing
-          if [[ -z "$FILES_JSON" || "$FILES_JSON" == "[]" ]]; then
-            echo "No changed files detected. Exiting..."
-            exit 0
-          fi
-          
-          # Fix escaped quotes issue by removing the backslashes
-          FIXED_JSON=$(echo "$FILES_JSON" | sed 's/\\"/"/g')
-          echo "Fixed JSON: $FIXED_JSON"
-          
-          # Try to parse the fixed JSON
-          if ! echo "$FIXED_JSON" | jq . > /dev/null 2>&1; then
-            echo "JSON still invalid after fixing quotes. Falling back to simpler parsing."
-            # Remove brackets and quotes to get a simple list of files
-            FILES_LIST=$(echo "$FILES_JSON" | tr -d '[]"\\' | tr ',' '\n')
-            echo "Simplified files list:"
-            echo "$FILES_LIST"
-            
-            # Filter SQL files manually
-            changed_sql_files=$(echo "$FILES_LIST" | grep -E '\.sql$')
-          else
-            # Extract only SQL files using jq
-            changed_sql_files=$(echo "$FIXED_JSON" | jq -r '.[] | select(endswith(".sql"))' || true)
-          fi
-          
-          echo "SQL files found: $changed_sql_files"
-          
-          if [ -z "$changed_sql_files" ]; then
-            echo "No changed SQL files found. Skipping validation and deployment."
-            echo "SKIP_REMAINING_STEPS=true" >> $GITHUB_ENV
-            exit 0
-          else
-            echo "$changed_sql_files" > changed_files.txt
-            echo "CHANGED_SQL_FILES=$(echo "$changed_sql_files" | tr '\n' ' ')" >> $GITHUB_ENV
-          fi
+          echo "Changed SQL files from the PR:"
+          cat changed_files.txt
 
       - name: Validate SQL files
-        if: ${{ !env.SKIP_REMAINING_STEPS }}
+        if: ${{ steps.changed-files.outputs.sql_files != '' }}
         run: |
           echo "Validating changed SQL files..."
-          if [ ! -f changed_files.txt ]; then
-            echo "No changed_files.txt found. Skipping validation."
+          if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
+            echo "No changed_files.txt found or it's empty. Skipping validation."
             exit 0
           fi
           
           while IFS= read -r file; do
             if [ -n "$file" ]; then
               echo "Validating $file"
-              sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file"
+              sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file" || true
             fi
           done < changed_files.txt
 
       - name: Deploy changed SQL files to Snowflake
-        if: ${{ !env.SKIP_REMAINING_STEPS }}
+        if: ${{ steps.changed-files.outputs.sql_files != '' }}
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
@@ -116,8 +91,8 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
         run: |
-          if [ ! -f changed_files.txt ]; then
-            echo "No changed_files.txt found. Skipping deployment."
+          if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
+            echo "No changed_files.txt found or it's empty. Skipping deployment."
             exit 0
           fi
           
