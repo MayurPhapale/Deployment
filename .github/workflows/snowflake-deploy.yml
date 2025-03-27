@@ -89,6 +89,7 @@ jobs:
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
           if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
             echo "No changed_files.txt found or it's empty. Skipping deployment."
@@ -108,12 +109,13 @@ jobs:
           warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
           database = os.getenv('SNOWFLAKE_DATABASE')
           schema = os.getenv('SNOWFLAKE_SCHEMA')
+          private_key=os.getenv('SNOWFLAKE_PRIVATE_KEY')
 
           # Connect to Snowflake
           conn = snowflake.connector.connect(
               account=account,
               user=user,
-              password=password,
+              private_key=private_key,
               role=role,
               warehouse=warehouse,
               database=database,
