@@ -5,17 +5,18 @@ on:
     types: [closed]
     branches:
       - main
+      - uat  # Added for UAT deployments
 
 jobs:
   deploy_to_snowflake:
-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'prod_release')
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # Fetch full history to ensure we get all changes
+          fetch-depth: 0  
 
       - name: Debug Branch
         run: echo "Running on branch $GITHUB_REF_NAME"
@@ -33,51 +34,39 @@ jobs:
       - name: Get changed files
         id: changed-files
         run: |
-          echo "Getting changed files between base and head of the PR..."
-          
-          # Get the base and head SHAs from the PR
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          
-          echo "Base SHA: $BASE_SHA"
-          echo "Head SHA: $HEAD_SHA"
-          
-          # Get all changed files (added, modified, and renamed)
           CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA)
-          
-          echo "All changed files:"
+
+          echo "Changed files:"
           echo "$CHANGED_FILES"
+
+          SQL_FILES=$(echo "$CHANGED_FILES" | grep -E '^scm_dm/.*\.sql$' || true)
           
-          # Filter only SQL files
-          SQL_FILES=$(echo "$CHANGED_FILES" | grep -E '\.sql$' || true)
-          
-          echo "Changed SQL files:"
+          echo "Changed SQL files in scm_dm:"
           echo "$SQL_FILES"
-          
-          # Save to output and environment variable
+
           echo "$SQL_FILES" > changed_files.txt
           echo "sql_files=$(echo "$SQL_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
 
-      - name: Debug Changed Files
+      - name: Determine Database Name
+        id: set-db
         run: |
-          echo "Changed SQL files from the PR:"
-          cat changed_files.txt
+          BRANCH_NAME=${{ github.event.pull_request.head.ref }}
+          TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
+          DB_NAME=""
 
-      - name: Validate SQL files
-        if: ${{ env.sql_files != '' }}
-        run: |
-          echo "Validating changed SQL files..."
-          if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
-            echo "No changed_files.txt found or it's empty. Skipping validation."
+          if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
+            DB_NAME="da_scm_uat"
+          elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
+            DB_NAME="da_scm_prod"
+          else
+            echo "No matching database for this merge. Skipping deployment."
             exit 0
           fi
-          
-          while IFS= read -r file; do
-            if [ -n "$file" ]; then
-              echo "Validating $file"
-              sqlfluff lint --exclude-rules LT02,RF04 --config .sqlfluff "$file" || true
-            fi
-          done < changed_files.txt
+
+          echo "Selected Database: $DB_NAME"
+          echo "SNOWFLAKE_DATABASE=$DB_NAME" >> $GITHUB_ENV
 
       - name: Deploy changed SQL files to Snowflake
         if: ${{ env.sql_files != '' }}
@@ -87,21 +76,20 @@ jobs:
           SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_DATABASE: ${{ env.SNOWFLAKE_DATABASE }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
           if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
-            echo "No changed_files.txt found or it's empty. Skipping deployment."
+            echo "No changed SQL files found. Exiting."
             exit 0
           fi
-          
+
           cat > deploy.py << 'EOL'
           import os
           import snowflake.connector
           import sys
-          
-          # Get environment variables
+
           account = os.getenv('SNOWFLAKE_ACCOUNT')
           user = os.getenv('SNOWFLAKE_USER')
           password = os.getenv('SNOWFLAKE_PASSWORD')
@@ -111,7 +99,6 @@ jobs:
           schema = os.getenv('SNOWFLAKE_SCHEMA')
           private_key=os.getenv('SNOWFLAKE_PRIVATE_KEY')
 
-          # Connect to Snowflake
           conn = snowflake.connector.connect(
               account=account,
               user=user,
@@ -123,7 +110,6 @@ jobs:
           )
           cursor = conn.cursor()
 
-          # Read changed SQL files
           with open("changed_files.txt", "r") as f:
               sql_files = [line.strip() for line in f.readlines() if line.strip()]
 
@@ -131,7 +117,7 @@ jobs:
               print("No SQL files to deploy. Exiting...")
               sys.exit(0)
 
-          print(f"Deploying {len(sql_files)} changed SQL files...")
+          print(f"Deploying {len(sql_files)} SQL files to database {database}...")
 
           for sql_file in sql_files:
               try:
