@@ -144,7 +144,7 @@ jobs:
           print(f"Deploying {len(sql_files)} SQL files to databases: {', '.join(databases)}")
 
           for database in databases:
-              cursor.execute(f"USE DATABASE {database}; USE SCHEMA {schema};")
+              cursor.execute(f"USE DATABASE {database};")
               for sql_file in sql_files:
                   try:
                       with open(sql_file, "r") as f:
