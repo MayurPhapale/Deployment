@@ -5,7 +5,7 @@ on:
     types: [closed]
     branches:
       - main
-      - uat  # Added for UAT deployments
+      - uat  
 
 jobs:
   deploy_to_snowflake:
@@ -45,13 +45,12 @@ jobs:
           echo "$CHANGED_FILES" > changed_files.txt
           echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
 
-      - name: Determine Databases
+      - name: Determine Databases and Map SQL Files
         id: set-db
         run: |
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
 
-          # Determine environment suffix
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
             ENV_SUFFIX="_UAT"
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
@@ -61,7 +60,6 @@ jobs:
             exit 0
           fi
 
-          # Function to get the database name based on the folder
           get_database_name() {
             local folder=$1
             case $folder in
@@ -72,22 +70,24 @@ jobs:
               prc_dm) echo "DA_PRC" ;;
               scm_dm) echo "DA_SCM" ;;
               udp) echo "DA_UDP" ;;
-              *) echo "" ;;  # Handle unknown folders gracefully
+              *) echo "" ;;
             esac
           }
 
-          # Extract databases from changed SQL files
           DATABASES=""
+          echo "" > sql_to_db_mapping.txt
+
           while IFS= read -r FILE; do
             FOLDER=$(echo "$FILE" | cut -d'/' -f1)
             DB_NAME=$(get_database_name "$FOLDER")
 
             if [[ -n "$DB_NAME" ]]; then
-              DATABASES+="${DB_NAME}${ENV_SUFFIX}"$'\n'
+              DB_NAME="${DB_NAME}${ENV_SUFFIX}"
+              DATABASES+="${DB_NAME}"$'\n'
+              echo "$DB_NAME:$FILE" >> sql_to_db_mapping.txt
             fi
           done < changed_files.txt
 
-          # Remove duplicates and ensure at least one valid database
           DATABASES=$(echo "$DATABASES" | sort -u)
           if [[ -z "$DATABASES" ]]; then
             echo "No valid databases found for deployment. Exiting."
@@ -97,7 +97,6 @@ jobs:
           echo "Selected Databases:"
           echo "$DATABASES"
 
-          # Store databases in environment variables
           echo "$DATABASES" > databases.txt
           echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
 
@@ -112,7 +111,7 @@ jobs:
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
-          if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
+          if [ ! -f sql_to_db_mapping.txt ] || [ ! -s sql_to_db_mapping.txt ]; then
             echo "No changed SQL files found. Exiting."
             exit 0
           fi
@@ -126,8 +125,6 @@ jobs:
           user = os.getenv('SNOWFLAKE_USER')
           role = os.getenv('SNOWFLAKE_ROLE')
           warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
-          databases = os.getenv('SNOWFLAKE_DATABASES').split()
-          schema = os.getenv('SNOWFLAKE_SCHEMA')
           private_key = os.getenv('SNOWFLAKE_PRIVATE_KEY')
 
           conn = snowflake.connector.connect(
@@ -139,23 +136,22 @@ jobs:
           )
           cursor = conn.cursor()
 
-          with open("changed_files.txt", "r") as f:
-              sql_files = [line.strip() for line in f.readlines() if line.strip().endswith(".sql")]
+          with open("sql_to_db_mapping.txt", "r") as f:
+              sql_mappings = [line.strip().split(":") for line in f.readlines() if ":" in line]
 
-          if not sql_files:
+          if not sql_mappings:
               print("No SQL files to deploy. Exiting...")
               sys.exit(0)
 
-          print(f"Deploying {len(sql_files)} SQL files to databases: {', '.join(databases)}")
+          print("Deploying SQL files to respective databases...")
 
-          for database in databases:
+          for database, sql_file in sql_mappings:
               try:
                   cursor.execute(f"USE DATABASE {database};")
-                  for sql_file in sql_files:
-                      with open(sql_file, "r") as f:
-                          sql_content = f.read()
-                      print(f"Executing {sql_file} on {database}...")
-                      cursor.execute(sql_content)
+                  with open(sql_file, "r") as f:
+                      sql_content = f.read()
+                  print(f"Executing {sql_file} on {database}...")
+                  cursor.execute(sql_content)
               except Exception as e:
                   print(f"Error executing {sql_file} on {database}: {e}")
                   sys.exit(1)
