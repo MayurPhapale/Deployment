@@ -5,7 +5,7 @@ on:
     types: [closed]
     branches:
       - main
-      - uat  # Added for UAT deployments
+      - uat
 
 jobs:
   deploy_to_snowflake:
@@ -41,9 +41,15 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
-          SQL_FILES=$(echo "$CHANGED_FILES" | grep -E '^scm_dm/.*\.sql$' || true)
-          
-          echo "Changed SQL files in scm_dm:"
+          # Extract folder names and SQL files
+          SQL_FILES=""
+          for FILE in $CHANGED_FILES; do
+            if [[ $FILE == */*.sql ]]; then
+              SQL_FILES+="$FILE"$'\n'
+            fi
+          done
+
+          echo "Changed SQL files:"
           echo "$SQL_FILES"
 
           echo "$SQL_FILES" > changed_files.txt
@@ -54,29 +60,53 @@ jobs:
         run: |
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
-          DB_NAME=""
 
+          # Define folder-to-database mapping
+          declare -A DATABASE_MAP
+          DATABASE_MAP["com_dm"]="DA_COM"
+          DATABASE_MAP["fin_dm"]="DA_FIN"
+          DATABASE_MAP["mfg_dm"]="DA_MFG"
+          DATABASE_MAP["mrkt_dm"]="DA_MRKT"
+          DATABASE_MAP["prc_dm"]="DA_PRC"
+          DATABASE_MAP["scm_dm"]="DA_SCM"
+          DATABASE_MAP["udp"]="DA_UDP"
+
+          # Determine environment suffix
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
-            DB_NAME="da_scm_uat"
+            ENV_SUFFIX="_UAT"
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
-            DB_NAME="da_scm_prod"
+            ENV_SUFFIX="_PROD"
           else
             echo "No matching database for this merge. Skipping deployment."
             exit 0
           fi
 
-          echo "Selected Database: $DB_NAME"
-          echo "SNOWFLAKE_DATABASE=$DB_NAME" >> $GITHUB_ENV
+          # Determine database for each folder
+          DATABASES=""
+          while IFS= read -r FILE; do
+            FOLDER=$(echo "$FILE" | cut -d'/' -f1)
+            if [[ -n "${DATABASE_MAP[$FOLDER]}" ]]; then
+              DB_NAME="${DATABASE_MAP[$FOLDER]}$ENV_SUFFIX"
+              DATABASES+="$DB_NAME"$'\n'
+            fi
+          done < changed_files.txt
+
+          # Remove duplicates and set environment variable
+          DATABASES=$(echo "$DATABASES" | sort -u)
+          echo "Selected Databases:"
+          echo "$DATABASES"
+
+          echo "$DATABASES" > databases.txt
+          echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
 
       - name: Deploy changed SQL files to Snowflake
         if: ${{ env.sql_files != '' }}
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: ${{ env.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_DATABASES: ${{ env.SNOWFLAKE_DATABASES }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
@@ -92,21 +122,22 @@ jobs:
 
           account = os.getenv('SNOWFLAKE_ACCOUNT')
           user = os.getenv('SNOWFLAKE_USER')
-          password = os.getenv('SNOWFLAKE_PASSWORD')
           role = os.getenv('SNOWFLAKE_ROLE')
           warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
-          database = os.getenv('SNOWFLAKE_DATABASE')
           schema = os.getenv('SNOWFLAKE_SCHEMA')
           private_key=os.getenv('SNOWFLAKE_PRIVATE_KEY')
+
+          databases = os.getenv('SNOWFLAKE_DATABASES').split()
+          if not databases:
+              print("No databases selected. Exiting...")
+              sys.exit(0)
 
           conn = snowflake.connector.connect(
               account=account,
               user=user,
               private_key=private_key,
               role=role,
-              warehouse=warehouse,
-              database=database,
-              schema=schema
+              warehouse=warehouse
           )
           cursor = conn.cursor()
 
@@ -117,17 +148,23 @@ jobs:
               print("No SQL files to deploy. Exiting...")
               sys.exit(0)
 
-          print(f"Deploying {len(sql_files)} SQL files to database {database}...")
+          for db in databases:
+              print(f"Switching to database {db}...")
+              cursor.execute(f"USE DATABASE {db};")
 
-          for sql_file in sql_files:
-              try:
-                  with open(sql_file, "r") as f:
-                      sql_content = f.read()
-                  print(f"Executing {sql_file}...")
-                  cursor.execute(sql_content)
-              except Exception as e:
-                  print(f"Error executing {sql_file}: {e}")
-                  sys.exit(1)
+              for sql_file in sql_files:
+                  folder = sql_file.split('/')[0]
+                  expected_db_prefix = f"DA_{folder.upper()}"
+
+                  if expected_db_prefix in db:
+                      try:
+                          with open(sql_file, "r") as f:
+                              sql_content = f.read()
+                          print(f"Executing {sql_file} in {db}...")
+                          cursor.execute(sql_content)
+                      except Exception as e:
+                          print(f"Error executing {sql_file}: {e}")
+                          sys.exit(1)
 
           conn.close()
           EOL
