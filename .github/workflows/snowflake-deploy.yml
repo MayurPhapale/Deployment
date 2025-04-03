@@ -31,17 +31,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff jq
 
-      - name: Get changed files
+      - name: Get changed SQL files
         id: changed-files
         run: |
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA)
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
 
-          echo "Changed files:"
+          echo "Changed SQL files:"
           echo "$CHANGED_FILES"
 
-          # Save changed files to a text file for later use
+          # Save changed SQL files to a text file
           echo "$CHANGED_FILES" > changed_files.txt
           echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
 
@@ -50,7 +50,7 @@ jobs:
         run: |
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
-          
+
           # Determine environment suffix
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
             ENV_SUFFIX="_UAT"
@@ -76,19 +76,24 @@ jobs:
             esac
           }
 
-          # Extract databases from changed files
+          # Extract databases from changed SQL files
           DATABASES=""
           while IFS= read -r FILE; do
             FOLDER=$(echo "$FILE" | cut -d'/' -f1)
             DB_NAME=$(get_database_name "$FOLDER")
-            
+
             if [[ -n "$DB_NAME" ]]; then
               DATABASES+="${DB_NAME}${ENV_SUFFIX}"$'\n'
             fi
           done < changed_files.txt
 
-          # Remove duplicates
+          # Remove duplicates and ensure at least one valid database
           DATABASES=$(echo "$DATABASES" | sort -u)
+          if [[ -z "$DATABASES" ]]; then
+            echo "No valid databases found for deployment. Exiting."
+            exit 0
+          fi
+
           echo "Selected Databases:"
           echo "$DATABASES"
 
@@ -135,7 +140,7 @@ jobs:
           cursor = conn.cursor()
 
           with open("changed_files.txt", "r") as f:
-              sql_files = [line.strip() for line in f.readlines() if line.strip()]
+              sql_files = [line.strip() for line in f.readlines() if line.strip().endswith(".sql")]
 
           if not sql_files:
               print("No SQL files to deploy. Exiting...")
@@ -144,16 +149,16 @@ jobs:
           print(f"Deploying {len(sql_files)} SQL files to databases: {', '.join(databases)}")
 
           for database in databases:
-              cursor.execute(f"USE DATABASE {database};")
-              for sql_file in sql_files:
-                  try:
+              try:
+                  cursor.execute(f"USE DATABASE {database};")
+                  for sql_file in sql_files:
                       with open(sql_file, "r") as f:
                           sql_content = f.read()
                       print(f"Executing {sql_file} on {database}...")
                       cursor.execute(sql_content)
-                  except Exception as e:
-                      print(f"Error executing {sql_file} on {database}: {e}")
-                      sys.exit(1)
+              except Exception as e:
+                  print(f"Error executing {sql_file} on {database}: {e}")
+                  sys.exit(1)
 
           conn.close()
           EOL
