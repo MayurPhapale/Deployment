@@ -5,7 +5,7 @@ on:
     types: [closed]
     branches:
       - main
-      - uat
+      - uat  # Added for UAT deployments
 
 jobs:
   deploy_to_snowflake:
@@ -41,36 +41,16 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
-          # Extract folder names and SQL files
-          SQL_FILES=""
-          for FILE in $CHANGED_FILES; do
-            if [[ $FILE == */*.sql ]]; then
-              SQL_FILES+="$FILE"$'\n'
-            fi
-          done
+          # Save changed files to a text file for later use
+          echo "$CHANGED_FILES" > changed_files.txt
+          echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
 
-          echo "Changed SQL files:"
-          echo "$SQL_FILES"
-
-          echo "$SQL_FILES" > changed_files.txt
-          echo "sql_files=$(echo "$SQL_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
-
-      - name: Determine Database Name
+      - name: Determine Databases
         id: set-db
         run: |
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
-
-          # Define folder-to-database mapping
-          declare -A DATABASE_MAP
-          DATABASE_MAP["com_dm"]="DA_COM"
-          DATABASE_MAP["fin_dm"]="DA_FIN"
-          DATABASE_MAP["mfg_dm"]="DA_MFG"
-          DATABASE_MAP["mrkt_dm"]="DA_MRKT"
-          DATABASE_MAP["prc_dm"]="DA_PRC"
-          DATABASE_MAP["scm_dm"]="DA_SCM"
-          DATABASE_MAP["udp"]="DA_UDP"
-
+          
           # Determine environment suffix
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
             ENV_SUFFIX="_UAT"
@@ -81,21 +61,38 @@ jobs:
             exit 0
           fi
 
-          # Determine database for each folder
+          # Function to get the database name based on the folder
+          get_database_name() {
+            local folder=$1
+            case $folder in
+              com_dm) echo "DA_COM" ;;
+              fin_dm) echo "DA_FIN" ;;
+              mfg_dm) echo "DA_MFG" ;;
+              mrkt_dm) echo "DA_MRKT" ;;
+              prc_dm) echo "DA_PRC" ;;
+              scm_dm) echo "DA_SCM" ;;
+              udp) echo "DA_UDP" ;;
+              *) echo "" ;;  # Handle unknown folders gracefully
+            esac
+          }
+
+          # Extract databases from changed files
           DATABASES=""
           while IFS= read -r FILE; do
             FOLDER=$(echo "$FILE" | cut -d'/' -f1)
-            if [[ -n "${DATABASE_MAP[$FOLDER]}" ]]; then
-              DB_NAME="${DATABASE_MAP[$FOLDER]}$ENV_SUFFIX"
-              DATABASES+="$DB_NAME"$'\n'
+            DB_NAME=$(get_database_name "$FOLDER")
+            
+            if [[ -n "$DB_NAME" ]]; then
+              DATABASES+="${DB_NAME}${ENV_SUFFIX}"$'\n'
             fi
           done < changed_files.txt
 
-          # Remove duplicates and set environment variable
+          # Remove duplicates
           DATABASES=$(echo "$DATABASES" | sort -u)
           echo "Selected Databases:"
           echo "$DATABASES"
 
+          # Store databases in environment variables
           echo "$DATABASES" > databases.txt
           echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
 
@@ -124,13 +121,9 @@ jobs:
           user = os.getenv('SNOWFLAKE_USER')
           role = os.getenv('SNOWFLAKE_ROLE')
           warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
-          schema = os.getenv('SNOWFLAKE_SCHEMA')
-          private_key=os.getenv('SNOWFLAKE_PRIVATE_KEY')
-
           databases = os.getenv('SNOWFLAKE_DATABASES').split()
-          if not databases:
-              print("No databases selected. Exiting...")
-              sys.exit(0)
+          schema = os.getenv('SNOWFLAKE_SCHEMA')
+          private_key = os.getenv('SNOWFLAKE_PRIVATE_KEY')
 
           conn = snowflake.connector.connect(
               account=account,
@@ -148,23 +141,19 @@ jobs:
               print("No SQL files to deploy. Exiting...")
               sys.exit(0)
 
-          for db in databases:
-              print(f"Switching to database {db}...")
-              cursor.execute(f"USE DATABASE {db};")
+          print(f"Deploying {len(sql_files)} SQL files to databases: {', '.join(databases)}")
 
+          for database in databases:
+              cursor.execute(f"USE DATABASE {database}; USE SCHEMA {schema};")
               for sql_file in sql_files:
-                  folder = sql_file.split('/')[0]
-                  expected_db_prefix = f"DA_{folder.upper()}"
-
-                  if expected_db_prefix in db:
-                      try:
-                          with open(sql_file, "r") as f:
-                              sql_content = f.read()
-                          print(f"Executing {sql_file} in {db}...")
-                          cursor.execute(sql_content)
-                      except Exception as e:
-                          print(f"Error executing {sql_file}: {e}")
-                          sys.exit(1)
+                  try:
+                      with open(sql_file, "r") as f:
+                          sql_content = f.read()
+                      print(f"Executing {sql_file} on {database}...")
+                      cursor.execute(sql_content)
+                  except Exception as e:
+                      print(f"Error executing {sql_file} on {database}: {e}")
+                      sys.exit(1)
 
           conn.close()
           EOL
