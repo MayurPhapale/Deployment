@@ -31,15 +31,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff jq
 
-      - name: Get changed SQL files in commit order
+      - name: Get changed SQL files in Sorted order
         id: changed-files
         run: |
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
           
-          # Get files in commit order
-          CHANGED_FILES=$(git log --pretty=format: --name-only $BASE_SHA..$HEAD_SHA | grep '\.sql$' | awk '!seen[$0]++' | tac || true)
-
+          # Get files in sorted manner
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
           echo "Changed SQL files:"
           echo "$CHANGED_FILES"
 
