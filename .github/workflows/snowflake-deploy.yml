@@ -31,14 +31,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff jq
 
-      - name: Get changed SQL files
+      - name: Get changed SQL files in commit order
         id: changed-files
         run: |
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
           
           # Get files in commit order
-          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
+          CHANGED_FILES=$(git log --pretty=format: --name-only $BASE_SHA..$HEAD_SHA | grep '\.sql$' | awk '!seen[$0]++' | tac || true)
+
           echo "Changed SQL files:"
           echo "$CHANGED_FILES"
 
@@ -146,18 +147,43 @@ jobs:
 
           print("Deploying SQL files to respective databases...")
 
+          success_count = 0
+          failure_count = 0
+          failed_files = []
+
+          # Process files in order they appear in the file (which is commit order)
           for database, sql_file in sql_mappings:
               try:
                   cursor.execute(f"USE DATABASE {database};")
                   with open(sql_file, "r") as f:
                       sql_content = f.read()
+                  
                   print(f"Executing {sql_file} on {database}...")
                   cursor.execute(sql_content)
+                  success_count += 1
+                  print(f"✅ Successfully executed {sql_file}")
+                  
               except Exception as e:
-                  print(f"Error executing {sql_file} on {database}: {e}")
-                  sys.exit(1)
+                  print(f"❌ Error executing {sql_file} on {database}: {e}")
+                  failure_count += 1
+                  failed_files.append(f"{sql_file} on {database}: {str(e)}")
+                  # Continue execution instead of exiting
 
           conn.close()
+
+          # Print summary
+          print("\n----- DEPLOYMENT SUMMARY -----")
+          print(f"Total files processed: {success_count + failure_count}")
+          print(f"Successfully executed: {success_count}")
+          print(f"Failed: {failure_count}")
+          
+          if failure_count > 0:
+              print("\nFailed files:")
+              for failed in failed_files:
+                  print(f"  - {failed}")
+              sys.exit(1)  # Exit with error code only after attempting all files
+          else:
+              print("\nAll files executed successfully!")
           EOL
           
           python deploy.py
