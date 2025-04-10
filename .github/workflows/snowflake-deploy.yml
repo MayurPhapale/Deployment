@@ -121,7 +121,6 @@ jobs:
           import os
           import snowflake.connector
           import sys
-          import re
 
           account = os.getenv('SNOWFLAKE_ACCOUNT')
           user = os.getenv('SNOWFLAKE_USER')
@@ -147,6 +146,64 @@ jobs:
 
           print("Deploying SQL files to respective databases...")
 
+          def split_sql_statements(sql_content):
+              """Split SQL content into individual statements by semicolons, ignoring semicolons in comments/strings"""
+              statements = []
+              current_statement = []
+              in_multiline_comment = False
+              
+              for line in sql_content.splitlines():
+                  line_to_process = line
+                  
+                  # Handle multiline comments
+                  if in_multiline_comment:
+                      # Look for the closing comment marker
+                      if "*/" in line:
+                          in_multiline_comment = False
+                          # Keep only text after the comment closes
+                          line_to_process = line.split("*/", 1)[1] if len(line.split("*/", 1)) > 1 else ""
+                      else:
+                          # Still in comment, skip line
+                          continue
+                  
+                  # Check for start of multiline comment
+                  if "/*" in line_to_process and not in_multiline_comment:
+                      parts = line_to_process.split("/*", 1)
+                      # Keep text before the comment starts
+                      line_to_process = parts[0]
+                      # Check if comment ends on same line
+                      if "*/" in parts[1]:
+                          # Comment ends on same line
+                          line_to_process += parts[1].split("*/", 1)[1]
+                      else:
+                          # Comment continues to next lines
+                          in_multiline_comment = True
+                  
+                  # Remove single-line comments
+                  if "--" in line_to_process:
+                      line_to_process = line_to_process.split("--", 1)[0]
+                  if "#" in line_to_process:
+                      line_to_process = line_to_process.split("#", 1)[0]
+                      
+                  # Skip if line is empty after removing comments
+                  if not line_to_process.strip():
+                      continue
+                      
+                  # Add line to current statement
+                  current_statement.append(line)
+                  
+                  # Check if this line ends a statement
+                  if line_to_process.strip().endswith(';'):
+                      if current_statement:
+                          statements.append('\n'.join(current_statement))
+                          current_statement = []
+              
+              # Add any remaining statement without semicolon
+              if current_statement:
+                  statements.append('\n'.join(current_statement))
+                  
+              return statements
+
           def execute_sql_file(cursor, sql_file, database):
               """Execute a SQL file that may contain multiple statements"""
               try:
@@ -157,34 +214,7 @@ jobs:
                   print(f"Executing {sql_file} on {database}...")
                   
                   # Split SQL into individual statements
-                  statements = []
-                  current_statement = []
-                  
-                  for line in sql_content.splitlines():
-                      # Skip empty lines
-                      if not line.strip():
-                          continue
-                      
-                      # Handle full-line comments
-                      if line.strip().startswith('--') or line.strip().startswith('#'):
-                          continue
-                      
-                      # Handle inline comments (remove them)
-                      line_without_comments = re.sub(r'--.*$', '', line)
-                      
-                      # Add line to current statement if it's not just a comment
-                      if line_without_comments.strip():
-                          current_statement.append(line)
-                      
-                      # Check if this line ends a statement
-                      if line.strip().endswith(';'):
-                          if current_statement:
-                              statements.append('\n'.join(current_statement))
-                              current_statement = []
-                  
-                  # Add any remaining statement without semicolon
-                  if current_statement:
-                      statements.append('\n'.join(current_statement))
+                  statements = split_sql_statements(sql_content)
                   
                   # Execute each statement separately
                   for i, statement in enumerate(statements):
