@@ -7,6 +7,10 @@ CREATE OR REPLACE TABLE WORK_SCM_ELT.TEST17  --create table
   ( 
   ID NUMBER,
   --ADDRESS VARCHAR
+  /*
+  ADDRESS VARCHAR
+  */
+  ADDRESS VARCHAR
   );
 
 --alter 
