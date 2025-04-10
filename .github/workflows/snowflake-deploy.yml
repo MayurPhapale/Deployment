@@ -121,6 +121,7 @@ jobs:
           import os
           import snowflake.connector
           import sys
+          import re
 
           account = os.getenv('SNOWFLAKE_ACCOUNT')
           user = os.getenv('SNOWFLAKE_USER')
@@ -146,26 +147,73 @@ jobs:
 
           print("Deploying SQL files to respective databases...")
 
-          success_count = 0
-          failure_count = 0
-          failed_files = []
-
-          # Process files in order they appear in the file (which is commit order)
-          for database, sql_file in sql_mappings:
+          def execute_sql_file(cursor, sql_file, database):
+              """Execute a SQL file that may contain multiple statements"""
               try:
                   cursor.execute(f"USE DATABASE {database};")
                   with open(sql_file, "r") as f:
                       sql_content = f.read()
                   
                   print(f"Executing {sql_file} on {database}...")
-                  cursor.execute(sql_content)
-                  success_count += 1
-                  print(f"✅ Successfully executed {sql_file}")
+                  
+                  # Split SQL into individual statements
+                  statements = []
+                  current_statement = []
+                  
+                  for line in sql_content.splitlines():
+                      # Skip empty lines
+                      if not line.strip():
+                          continue
+                      
+                      # Handle full-line comments
+                      if line.strip().startswith('--') or line.strip().startswith('#'):
+                          continue
+                      
+                      # Handle inline comments (remove them)
+                      line_without_comments = re.sub(r'--.*$', '', line)
+                      
+                      # Add line to current statement if it's not just a comment
+                      if line_without_comments.strip():
+                          current_statement.append(line)
+                      
+                      # Check if this line ends a statement
+                      if line.strip().endswith(';'):
+                          if current_statement:
+                              statements.append('\n'.join(current_statement))
+                              current_statement = []
+                  
+                  # Add any remaining statement without semicolon
+                  if current_statement:
+                      statements.append('\n'.join(current_statement))
+                  
+                  # Execute each statement separately
+                  for i, statement in enumerate(statements):
+                      if statement.strip():  # Skip empty statements
+                          try:
+                              cursor.execute(statement)
+                              print(f"  ✅ Statement {i+1}/{len(statements)} executed successfully")
+                          except Exception as e:
+                              print(f"  ❌ Error in statement {i+1}/{len(statements)}: {e}")
+                              raise Exception(f"Failed at statement {i+1}/{len(statements)}: {e}")
+                  
+                  return True, None
                   
               except Exception as e:
-                  print(f"❌ Error executing {sql_file} on {database}: {e}")
+                  return False, str(e)
+
+          success_count = 0
+          failure_count = 0
+          failed_files = []
+
+          # Process files in order they appear in the file
+          for database, sql_file in sql_mappings:
+              success, error_msg = execute_sql_file(cursor, sql_file, database)
+              if success:
+                  success_count += 1
+                  print(f"✅ Successfully executed {sql_file}")
+              else:
                   failure_count += 1
-                  failed_files.append(f"{sql_file} on {database}: {str(e)}")
+                  failed_files.append(f"{sql_file} on {database}: {error_msg}")
                   # Continue execution instead of exiting
 
           conn.close()
