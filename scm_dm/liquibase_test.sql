@@ -8,6 +8,7 @@ CREATE TABLE test_table (
 );
 --rollback DROP TABLE test_table;
 
+
 --changeset author:insert_test_data_1
 INSERT INTO test_table (id, name) VALUES (1, 'Test Record 1');
 --rollback DELETE FROM test_table WHERE id = 1;
