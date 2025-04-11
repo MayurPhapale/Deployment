@@ -1,14 +1,14 @@
-name: Snowflake Deployment with Liquibase
+name: Snowflake Deployment via Liquibase
 
 on:
   pull_request:
     types: [closed]
     branches:
       - main
-      - uat  
+      - uat
 
 jobs:
-  deploy_to_snowflake:
+  deploy_with_liquibase:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
@@ -16,75 +16,46 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0  
+          fetch-depth: 0
 
       - name: Debug Branch
         run: echo "Running on branch $GITHUB_REF_NAME"
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Set up Java (for Liquibase)
+        uses: actions/setup-java@v3
         with:
-          python-version: '3.9'
+          distribution: 'temurin'
+          java-version: '17'
 
-      - name: Install dependencies
+      - name: Install Liquibase and Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install snowflake-connector-python sqlfluff jq
-          
-      - name: Install Liquibase
-        run: |
-          # Create destination directory
-          mkdir -p /opt
-          
-          # Download and extract Liquibase
-          wget -O liquibase.tar.gz https://github.com/liquibase/liquibase/releases/download/v4.20.0/liquibase-4.20.0.tar.gz
-          
-          # Extract to /opt
-          tar -xf liquibase.tar.gz -C /opt
-          
-          # List contents to debug structure
-          ls -la /opt
-          
-          # Find and make liquibase executable
-          find /opt -name "liquibase" -type f -exec chmod +x {} \;
-          
-          # Create symlink
-          find /opt -name "liquibase" -type f -exec ln -s {} /usr/local/bin/ \;
-          
-          # Download Snowflake JDBC driver
-          mkdir -p /opt/liquibase/lib
-          wget -O /opt/liquibase/lib/snowflake-jdbc.jar https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.13.27/snowflake-jdbc-3.13.27.jar
-      - name: Get changed SQL files in Sorted order
+          curl -sL https://github.com/liquibase/liquibase/releases/latest/download/liquibase.zip -o liquibase.zip
+          unzip liquibase.zip -d liquibase
+          sudo mv liquibase/liquibase /usr/local/bin/liquibase
+          liquibase --version
+
+      - name: Get changed SQL files
         id: changed-files
         run: |
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          
-          # Get files in sorted manner
           CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
-          echo "Changed SQL files:"
-          echo "$CHANGED_FILES"
-          # Save changed SQL files to a text file
           echo "$CHANGED_FILES" > changed_files.txt
           echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
-          
-      - name: Determine Databases and Map SQL Files
-        id: set-db
+
+      - name: Determine Environment and DB Mapping
+        id: env-map
         run: |
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
             ENV_SUFFIX="_UAT"
-            SCHEMA="UAT"
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
             ENV_SUFFIX="_PROD"
-            SCHEMA="PROD"
           else
-            echo "No matching database for this merge. Skipping deployment."
+            echo "❌ No valid env suffix match. Skipping."
             exit 0
           fi
-          echo "SCHEMA=$SCHEMA" >> $GITHUB_ENV
-          
           get_database_name() {
             local folder=$1
             case $folder in
@@ -98,145 +69,45 @@ jobs:
               *) echo "" ;;
             esac
           }
-          DATABASES=""
           echo "" > sql_to_db_mapping.txt
           while IFS= read -r FILE; do
             FOLDER=$(echo "$FILE" | cut -d'/' -f1)
             DB_NAME=$(get_database_name "$FOLDER")
             if [[ -n "$DB_NAME" ]]; then
-              DB_NAME="${DB_NAME}${ENV_SUFFIX}"
-              DATABASES+="${DB_NAME}"$'\n'
-              echo "$DB_NAME:$FILE" >> sql_to_db_mapping.txt
+              echo "${DB_NAME}${ENV_SUFFIX}:$FILE" >> sql_to_db_mapping.txt
             fi
           done < changed_files.txt
-          DATABASES=$(echo "$DATABASES" | sort -u)
-          if [[ -z "$DATABASES" ]]; then
-            echo "No valid databases found for deployment. Exiting."
-            exit 0
-          fi
-          echo "Selected Databases:"
-          echo "$DATABASES"
-          echo "$DATABASES" > databases.txt
-          echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
-          
-      - name: Create Liquibase changelog files
-        if: ${{ env.sql_files != '' }}
+          cat sql_to_db_mapping.txt
+
+      - name: Save Snowflake Private Key to file
         run: |
-          mkdir -p changesets
-          
-          while IFS=: read -r DB_NAME SQL_FILE; do
-            if [ -z "$DB_NAME" ] || [ -z "$SQL_FILE" ]; then
-              continue
-            fi
-            
-            # Create unique ID from file path
-            CHANGESET_ID=$(echo "$SQL_FILE" | sed 's/[^a-zA-Z0-9]/_/g')
-            
-            # Get filename without extension
-            FILENAME=$(basename "$SQL_FILE" .sql)
-            
-            # Create changelog XML for this file
-            CHANGELOG_FILE="changesets/${DB_NAME}_${FILENAME}.xml"
-            
-            echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" > "$CHANGELOG_FILE"
-            echo "<databaseChangeLog" >> "$CHANGELOG_FILE"
-            echo "  xmlns=\"http://www.liquibase.org/xml/ns/dbchangelog\"" >> "$CHANGELOG_FILE"
-            echo "  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"" >> "$CHANGELOG_FILE"
-            echo "  xsi:schemaLocation=\"http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd\">" >> "$CHANGELOG_FILE"
-            
-            echo "  <changeSet id=\"${CHANGESET_ID}\" author=\"github-actions\">" >> "$CHANGELOG_FILE"
-            echo "    <sqlFile path=\"${SQL_FILE}\" relativeToChangelogFile=\"false\" splitStatements=\"true\" stripComments=\"true\"/>" >> "$CHANGELOG_FILE"
-            echo "    <rollback>" >> "$CHANGELOG_FILE"
-            echo "      <!-- Auto-generated rollback - customize as needed -->" >> "$CHANGELOG_FILE"
-            echo "      <sql>-- Rollback statements for ${SQL_FILE}</sql>" >> "$CHANGELOG_FILE"
-            echo "    </rollback>" >> "$CHANGELOG_FILE"
-            echo "  </changeSet>" >> "$CHANGELOG_FILE"
-            
-            echo "</databaseChangeLog>" >> "$CHANGELOG_FILE"
-            
-            echo "Created changelog for $SQL_FILE -> $CHANGELOG_FILE"
-            echo "${DB_NAME}:${CHANGELOG_FILE}" >> changelog_mapping.txt
-          done < sql_to_db_mapping.txt
-          
-      - name: Deploy with Liquibase using Private Key Authentication
-        if: ${{ env.sql_files != '' }}
+          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" | base64 --decode > snowflake_key.p8
+          chmod 600 snowflake_key.p8
+
+      - name: Deploy SQL files using Liquibase
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_USERNAME: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
-          SNOWFLAKE_DATABASES: ${{ env.SNOWFLAKE_DATABASES }}
-          SNOWFLAKE_SCHEMA: ${{ env.SCHEMA }}
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          SNOWFLAKE_KEYFILE: snowflake_key.p8
+          SNOWFLAKE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
         run: |
-          # Save private key to file
-          echo "$SNOWFLAKE_PRIVATE_KEY" > snowflake_key.p8
-          chmod 600 snowflake_key.p8
-          
-          # Create properties file template with private key auth
-          cat > liquibase.properties.template << 'EOL'
-          changeLogFile: changelog.xml
-          url: jdbc:snowflake://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?db=${DATABASE}&schema=${SNOWFLAKE_SCHEMA}&warehouse=${SNOWFLAKE_WAREHOUSE}&role=${SNOWFLAKE_ROLE}&private_key_file=snowflake_key.p8
-          username: ${SNOWFLAKE_USER}
-          driver: net.snowflake.client.jdbc.SnowflakeDriver
-          EOL
-          
-          # Deploy to each database
-          SUCCESS_COUNT=0
-          FAILURE_COUNT=0
-          FAILED_DATABASES=()
-          
-          while IFS=: read -r DB_NAME CHANGELOG_FILE; do
-            if [ -z "$DB_NAME" ] || [ -z "$CHANGELOG_FILE" ]; then
-              continue
-            fi
-            
-            echo "Deploying to database: $DB_NAME using changelog: $CHANGELOG_FILE"
-            
-            # Create specific properties file for this database
-            PROPS_FILE="${DB_NAME}_liquibase.properties"
-            cat liquibase.properties.template | \
-              sed "s/\${SNOWFLAKE_ACCOUNT}/$SNOWFLAKE_ACCOUNT/g" | \
-              sed "s/\${DATABASE}/$DB_NAME/g" | \
-              sed "s/\${SNOWFLAKE_SCHEMA}/$SNOWFLAKE_SCHEMA/g" | \
-              sed "s/\${SNOWFLAKE_USER}/$SNOWFLAKE_USER/g" | \
-              sed "s/\${SNOWFLAKE_ROLE}/$SNOWFLAKE_ROLE/g" | \
-              sed "s/\${SNOWFLAKE_WAREHOUSE}/$SNOWFLAKE_WAREHOUSE/g" > "$PROPS_FILE"
-            
-            # Run liquibase update
-            echo "Running Liquibase update for $DB_NAME..."
-            if liquibase --defaultsFile="$PROPS_FILE" --changeLogFile="$CHANGELOG_FILE" update; then
-              echo "✅ Successfully deployed to $DB_NAME"
-              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-            else
-              echo "❌ Failed to deploy to $DB_NAME"
-              FAILURE_COUNT=$((FAILURE_COUNT + 1))
-              FAILED_DATABASES+=("$DB_NAME")
-              
-              # Attempt rollback
-              echo "Attempting rollback for $DB_NAME..."
-              if liquibase --defaultsFile="$PROPS_FILE" --changeLogFile="$CHANGELOG_FILE" rollbackCount 1; then
-                echo "✅ Successfully rolled back changes for $DB_NAME"
-              else
-                echo "⚠️ Warning: Rollback failed for $DB_NAME"
-              fi
-            fi
-          done < changelog_mapping.txt
-          
-          # Secure cleanup of private key
-          rm -f snowflake_key.p8
-          
-          # Print summary
-          echo ""
-          echo "----- DEPLOYMENT SUMMARY -----"
-          echo "Total databases processed: $((SUCCESS_COUNT + FAILURE_COUNT))"
-          echo "Successfully deployed: $SUCCESS_COUNT"
-          echo "Failed: $FAILURE_COUNT"
-          
-          if [ $FAILURE_COUNT -gt 0 ]; then
-            echo "Failed databases:"
-            for DB in "${FAILED_DATABASES[@]}"; do
-              echo "  - $DB"
-            done
-            exit 1
-          fi
+          while IFS=: read -r DATABASE FILE; do
+            echo "Deploying $FILE to $DATABASE..."
+
+            liquibase \
+              --url="jdbc:snowflake://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?warehouse=${SNOWFLAKE_WAREHOUSE}&role=${SNOWFLAKE_ROLE}&db=${DATABASE}&schema=${SNOWFLAKE_SCHEMA}" \
+              --changeLogFile="$FILE" \
+              --username="${SNOWFLAKE_USERNAME}" \
+              --snowsqlPrivateKeyFile="${SNOWFLAKE_KEYFILE}" \
+              --snowsqlPrivateKeyPassphrase="${SNOWFLAKE_KEY_PASSPHRASE}" \
+              update || {
+                echo "❌ Liquibase failed on $FILE. Exiting."
+                exit 1
+              }
+
+            echo "✅ Successfully deployed $FILE"
+
+          done < sql_to_db_mapping.txt
