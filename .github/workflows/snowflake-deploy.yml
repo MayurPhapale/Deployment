@@ -111,14 +111,13 @@ jobs:
             echo "Deploying $FILE to $DATABASE..."
 
             # Create a properties file for this deployment
-            cat > liquibase.properties << EOF
-            changeLogFile=$FILE
+            cat << 'EOT' > liquibase.properties
+            changeLogFile=${FILE}
             url=jdbc:snowflake://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?warehouse=${SNOWFLAKE_WAREHOUSE}&role=${SNOWFLAKE_ROLE}&db=${DATABASE}&schema=${SNOWFLAKE_SCHEMA}
             username=${SNOWFLAKE_USERNAME}
             password=${SNOWFLAKE_KEY_PASSPHRASE}
-            # privateKeyPath option for Snowflake
             liquibase.command.update.rollbackOnError=true
-            EOF
+            EOT
 
             # Run liquibase with the properties file
             liquibase update --defaults-file=liquibase.properties || {
