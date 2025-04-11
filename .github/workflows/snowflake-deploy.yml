@@ -33,14 +33,27 @@ jobs:
           
       - name: Install Liquibase
         run: |
+          # Create destination directory
+          mkdir -p /opt
+          
+          # Download and extract Liquibase
           wget -O liquibase.tar.gz https://github.com/liquibase/liquibase/releases/download/v4.20.0/liquibase-4.20.0.tar.gz
+          
+          # Extract to /opt
           tar -xf liquibase.tar.gz -C /opt
-          chmod +x /opt/liquibase/liquibase
-          ln -s /opt/liquibase/liquibase /usr/local/bin/
+          
+          # List contents to debug structure
+          ls -la /opt
+          
+          # Find and make liquibase executable
+          find /opt -name "liquibase" -type f -exec chmod +x {} \;
+          
+          # Create symlink
+          find /opt -name "liquibase" -type f -exec ln -s {} /usr/local/bin/ \;
           
           # Download Snowflake JDBC driver
+          mkdir -p /opt/liquibase/lib
           wget -O /opt/liquibase/lib/snowflake-jdbc.jar https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.13.27/snowflake-jdbc-3.13.27.jar
-
       - name: Get changed SQL files in Sorted order
         id: changed-files
         run: |
