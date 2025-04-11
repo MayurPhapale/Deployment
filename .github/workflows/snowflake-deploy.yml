@@ -110,18 +110,22 @@ jobs:
           while IFS=: read -r DATABASE FILE; do
             echo "Deploying $FILE to $DATABASE..."
 
-            liquibase \
-              --url="jdbc:snowflake://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?warehouse=${SNOWFLAKE_WAREHOUSE}&role=${SNOWFLAKE_ROLE}&db=${DATABASE}&schema=${SNOWFLAKE_SCHEMA}" \
-              --changeLogFile="$FILE" \
-              --username="${SNOWFLAKE_USERNAME}" \
-              --snowsqlPrivateKeyFile="${SNOWFLAKE_KEYFILE}" \
-              --snowsqlPrivateKeyPassphrase="${SNOWFLAKE_KEY_PASSPHRASE}" \
-              --rollbackOnError=true \
-              update || {
-                echo "❌ Liquibase failed on $FILE. Changes in this file have been automatically rolled back."
-                # Continue to the next file without exiting the workflow
-                continue
-              }
+            # Create a properties file for this deployment
+            cat > liquibase.properties << EOF
+            changeLogFile=$FILE
+            url=jdbc:snowflake://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?warehouse=${SNOWFLAKE_WAREHOUSE}&role=${SNOWFLAKE_ROLE}&db=${DATABASE}&schema=${SNOWFLAKE_SCHEMA}
+            username=${SNOWFLAKE_USERNAME}
+            password=${SNOWFLAKE_KEY_PASSPHRASE}
+            # privateKeyPath option for Snowflake
+            liquibase.command.update.rollbackOnError=true
+            EOF
+
+            # Run liquibase with the properties file
+            liquibase update --defaults-file=liquibase.properties || {
+              echo "❌ Liquibase failed on $FILE. Changes in this file have been automatically rolled back."
+              # Continue to the next file without exiting the workflow
+              continue
+            }
 
             echo "✅ Successfully deployed $FILE"
 
