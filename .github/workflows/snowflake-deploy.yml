@@ -29,9 +29,13 @@ jobs:
 
       - name: Install Liquibase and Dependencies
         run: |
-          curl -sL https://github.com/liquibase/liquibase/releases/latest/download/liquibase.zip -o liquibase.zip
-          unzip liquibase.zip -d liquibase
-          sudo mv liquibase/liquibase /usr/local/bin/liquibase
+          # Use a specific version instead of latest to ensure stability
+          wget -q https://github.com/liquibase/liquibase/releases/download/v4.23.0/liquibase-4.23.0.zip -O liquibase.zip
+          unzip -o liquibase.zip -d liquibase
+          chmod +x liquibase/liquibase
+          sudo mv liquibase/liquibase /usr/local/bin/
+          # Install Snowflake JDBC driver
+          wget -q https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.13.30/snowflake-jdbc-3.13.30.jar -O /usr/local/bin/lib/snowflake-jdbc.jar
           liquibase --version
 
       - name: Get changed SQL files
