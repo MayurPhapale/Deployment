@@ -33,9 +33,18 @@ jobs:
           wget -q https://github.com/liquibase/liquibase/releases/download/v4.23.0/liquibase-4.23.0.zip -O liquibase.zip
           unzip -o liquibase.zip -d liquibase
           chmod +x liquibase/liquibase
-          sudo mv liquibase/liquibase /usr/local/bin/
-          # Install Snowflake JDBC driver
-          wget -q https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.13.30/snowflake-jdbc-3.13.30.jar -O /usr/local/bin/lib/snowflake-jdbc.jar
+          
+          # Create necessary directories for JDBC driver
+          mkdir -p liquibase/lib
+          
+          # Download Snowflake JDBC driver to the lib directory
+          wget -q https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.13.30/snowflake-jdbc-3.13.30.jar -O liquibase/lib/snowflake-jdbc.jar
+          
+          # Move liquibase to path
+          sudo mv liquibase /usr/local/
+          sudo ln -sf /usr/local/liquibase/liquibase /usr/local/bin/liquibase
+          
+          # Verify installation
           liquibase --version
 
       - name: Get changed SQL files
