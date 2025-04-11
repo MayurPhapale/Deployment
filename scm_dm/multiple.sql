@@ -1,7 +1,7 @@
 /*
 Script by Mayur Phapale
 */
-
+;
 #create table
 CREATE OR REPLACE TABLE WORK_SCM_ELT.TEST17  --create table
   ( 

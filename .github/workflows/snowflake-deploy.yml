@@ -1,14 +1,14 @@
-name: Snowflake Deployment via Liquibase
+name: Snowflake Deployment
 
 on:
   pull_request:
     types: [closed]
     branches:
       - main
-      - uat
+      - uat  
 
 jobs:
-  deploy_with_liquibase:
+  deploy_to_snowflake:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
@@ -16,48 +16,35 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          fetch-depth: 0  
 
       - name: Debug Branch
         run: echo "Running on branch $GITHUB_REF_NAME"
 
-      - name: Set up Java (for Liquibase)
-        uses: actions/setup-java@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          python-version: '3.9'
 
-      - name: Install Liquibase and Dependencies
+      - name: Install dependencies
         run: |
-          # Use a specific version instead of latest to ensure stability
-          wget -q https://github.com/liquibase/liquibase/releases/download/v4.23.0/liquibase-4.23.0.zip -O liquibase.zip
-          unzip -o liquibase.zip -d liquibase
-          chmod +x liquibase/liquibase
-          
-          # Create necessary directories for JDBC driver
-          mkdir -p liquibase/lib
-          
-          # Download Snowflake JDBC driver to the lib directory
-          wget -q https://repo1.maven.org/maven2/net/snowflake/snowflake-jdbc/3.13.30/snowflake-jdbc-3.13.30.jar -O liquibase/lib/snowflake-jdbc.jar
-          
-          # Move liquibase to path
-          sudo mv liquibase /usr/local/
-          sudo ln -sf /usr/local/liquibase/liquibase /usr/local/bin/liquibase
-          
-          # Verify installation
-          liquibase --version
-
-      - name: Get changed SQL files
+          python -m pip install --upgrade pip
+          pip install snowflake-connector-python sqlfluff jq
+      - name: Get changed SQL files in Sorted order
         id: changed-files
         run: |
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          
+          # Get files in sorted manner
           CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
+          echo "Changed SQL files:"
+          echo "$CHANGED_FILES"
+          # Save changed SQL files to a text file
           echo "$CHANGED_FILES" > changed_files.txt
           echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
-
-      - name: Determine Environment and DB Mapping
-        id: env-map
+      - name: Determine Databases and Map SQL Files
+        id: set-db
         run: |
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
@@ -66,7 +53,7 @@ jobs:
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
             ENV_SUFFIX="_PROD"
           else
-            echo "❌ No valid env suffix match. Skipping."
+            echo "No matching database for this merge. Skipping deployment."
             exit 0
           fi
           get_database_name() {
@@ -82,48 +69,154 @@ jobs:
               *) echo "" ;;
             esac
           }
+          DATABASES=""
           echo "" > sql_to_db_mapping.txt
           while IFS= read -r FILE; do
             FOLDER=$(echo "$FILE" | cut -d'/' -f1)
             DB_NAME=$(get_database_name "$FOLDER")
             if [[ -n "$DB_NAME" ]]; then
-              echo "${DB_NAME}${ENV_SUFFIX}:$FILE" >> sql_to_db_mapping.txt
+              DB_NAME="${DB_NAME}${ENV_SUFFIX}"
+              DATABASES+="${DB_NAME}"$'\n'
+              echo "$DB_NAME:$FILE" >> sql_to_db_mapping.txt
             fi
           done < changed_files.txt
-          cat sql_to_db_mapping.txt
-
-      - name: Save Snowflake Private Key to file
-        run: |
-          echo "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" | base64 --decode > snowflake_key.p8
-          chmod 600 snowflake_key.p8
-
-      - name: Deploy SQL files using Liquibase
+          DATABASES=$(echo "$DATABASES" | sort -u)
+          if [[ -z "$DATABASES" ]]; then
+            echo "No valid databases found for deployment. Exiting."
+            exit 0
+          fi
+          echo "Selected Databases:"
+          echo "$DATABASES"
+          echo "$DATABASES" > databases.txt
+          echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
+      - name: Deploy changed SQL files to Snowflake
+        if: ${{ env.sql_files != '' }}
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_USERNAME: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_DATABASES: ${{ env.SNOWFLAKE_DATABASES }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
-          SNOWFLAKE_KEYFILE: snowflake_key.p8
-          SNOWFLAKE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_KEY_PASSPHRASE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
         run: |
-          while IFS=: read -r DATABASE FILE; do
-            echo "Deploying $FILE to $DATABASE..."
-            
-            # Use echo instead of heredoc
-            echo "changeLogFile=${FILE}" > liquibase.properties
-            echo "url=jdbc:snowflake://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/?warehouse=${SNOWFLAKE_WAREHOUSE}&role=${SNOWFLAKE_ROLE}&db=${DATABASE}&schema=${SNOWFLAKE_SCHEMA}" >> liquibase.properties
-            echo "username=${SNOWFLAKE_USERNAME}" >> liquibase.properties 
-            echo "password=${SNOWFLAKE_KEY_PASSPHRASE}" >> liquibase.properties
-            echo "liquibase.command.update.rollbackOnError=true" >> liquibase.properties
-
-            # Run liquibase with the properties file
-            liquibase update --defaults-file=liquibase.properties || {
-              echo "❌ Liquibase failed on $FILE. Changes in this file have been automatically rolled back."
-              # Continue to the next file without exiting the workflow
-              continue
-            }
-
-            echo "✅ Successfully deployed $FILE"
-
-          done < sql_to_db_mapping.txt
+          if [ ! -f sql_to_db_mapping.txt ] || [ ! -s sql_to_db_mapping.txt ]; then
+            echo "No changed SQL files found. Exiting."
+            exit 0
+          fi
+          cat > deploy.py << 'EOL'
+          import os
+          import snowflake.connector
+          import sys
+          import re
+          
+          account = os.getenv('SNOWFLAKE_ACCOUNT')
+          user = os.getenv('SNOWFLAKE_USER')
+          role = os.getenv('SNOWFLAKE_ROLE')
+          warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
+          private_key = os.getenv('SNOWFLAKE_PRIVATE_KEY')
+          
+          conn = snowflake.connector.connect(
+              account=account,
+              user=user,
+              private_key=private_key,
+              role=role,
+              warehouse=warehouse
+          )
+          cursor = conn.cursor()
+          
+          with open("sql_to_db_mapping.txt", "r") as f:
+              sql_mappings = [line.strip().split(":") for line in f.readlines() if ":" in line]
+          
+          if not sql_mappings:
+              print("No SQL files to deploy. Exiting...")
+              sys.exit(0)
+          
+          print("Deploying SQL files to respective databases...")
+          
+          def split_sql_statements(sql_content):
+              # Define valid SQL statement starting keywords
+              DDL_DML_KEYWORDS = [
+                  'CREATE', 'ALTER', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'TRUNCATE',
+                  'MERGE', 'GRANT', 'REVOKE', 'COMMENT', 'REPLACE', 'USE', 'SELECT'
+              ]
+              
+              # Remove multiline comments (/* */)
+              sql_content = re.sub(r'/\*.*?\*/', '', sql_content, flags=re.DOTALL)
+              
+              # Remove single-line comments (-- and #)
+              sql_content = re.sub(r'--.*', '', sql_content)
+              sql_content = re.sub(r'#.*', '', sql_content)
+              
+              # Split content into potential statements
+              raw_statements = sql_content.split(';')
+              
+              # Keep only the valid DDL/DML starting statements
+              statements = []
+              for stmt in raw_statements:
+                  stmt = stmt.strip()
+                  if stmt and any(stmt.upper().startswith(k) for k in DDL_DML_KEYWORDS):
+                      statements.append(stmt + ';')
+              
+              return statements
+          
+          def execute_sql_file(cursor, sql_file, database):
+              """Execute a SQL file that may contain multiple statements"""
+              try:
+                  cursor.execute(f"USE DATABASE {database};")
+                  with open(sql_file, "r") as f:
+                      sql_content = f.read()
+                  
+                  print(f"Executing {sql_file} on {database}...")
+                  
+                  # Split SQL into individual statements
+                  statements = split_sql_statements(sql_content)
+                  
+                  # Execute each statement separately
+                  for i, statement in enumerate(statements):
+                      if statement.strip():  # Skip empty statements
+                          try:
+                              cursor.execute(statement)
+                              print(f"  ✅ Statement {i+1}/{len(statements)} executed successfully")
+                          except Exception as e:
+                              print(f"  ❌ Error in statement {i+1}/{len(statements)}: {e}")
+                              raise Exception(f"Failed at statement {i+1}/{len(statements)}: {e}")
+                  
+                  return True, None
+                  
+              except Exception as e:
+                  return False, str(e)
+          
+          success_count = 0
+          failure_count = 0
+          failed_files = []
+          
+          # Process files in order they appear in the file
+          for database, sql_file in sql_mappings:
+              success, error_msg = execute_sql_file(cursor, sql_file, database)
+              if success:
+                  success_count += 1
+                  print(f"✅ Successfully executed {sql_file}")
+              else:
+                  failure_count += 1
+                  failed_files.append(f"{sql_file} on {database}: {error_msg}")
+                  # Continue execution instead of exiting
+          
+          conn.close()
+          
+          # Print summary
+          print("\n----- DEPLOYMENT SUMMARY -----")
+          print(f"Total files processed: {success_count + failure_count}")
+          print(f"Successfully executed: {success_count}")
+          print(f"Failed: {failure_count}")
+          
+          if failure_count > 0:
+              print("\nFailed files:")
+              for failed in failed_files:
+                  print(f"  - {failed}")
+              sys.exit(1)  # Exit with error code only after attempting all files
+          else:
+              print("\nAll files executed successfully!")
+          EOL
+          
+          python deploy.py
