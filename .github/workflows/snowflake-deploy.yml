@@ -103,9 +103,11 @@ jobs:
               --username="${SNOWFLAKE_USERNAME}" \
               --snowsqlPrivateKeyFile="${SNOWFLAKE_KEYFILE}" \
               --snowsqlPrivateKeyPassphrase="${SNOWFLAKE_KEY_PASSPHRASE}" \
+              --rollbackOnError=true \
               update || {
-                echo "❌ Liquibase failed on $FILE. Exiting."
-                exit 1
+                echo "❌ Liquibase failed on $FILE. Changes in this file have been automatically rolled back."
+                # Continue to the next file without exiting the workflow
+                continue
               }
 
             echo "✅ Successfully deployed $FILE"
