@@ -166,11 +166,11 @@ jobs:
               cursor.execute(f"USE DATABASE {audit_db};")
               cursor.execute("""
                   INSERT INTO AUDIT.DEPLOYMENT_AUDIT (
-                      DATETIME, SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE
+                      SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE
                   )
-                  VALUES (%(datetime)s, %(script_name)s, %(user)s, %(database)s, %(status)s, %(error)s)
+                  VALUES (%(script_name)s, %(user)s, %(database)s, %(status)s, %(error)s)
               """, {
-                  'datetime': datetime.utcnow(),
+                  
                   'script_name': script_name,
                   'user': user,
                   'database': database,
