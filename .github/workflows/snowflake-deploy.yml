@@ -90,6 +90,10 @@ jobs:
           echo "$DATABASES"
           echo "$DATABASES" > databases.txt
           echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
+
+      - name: Debug ENV_SUFFIX
+        run: |
+          echo "DEBUG: ENV_SUFFIX is $ENV_SUFFIX"
       - name: Deploy changed SQL files to Snowflake
         if: ${{ env.sql_files != '' }}
         env:
