@@ -50,8 +50,10 @@ jobs:
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
             echo "ENV_SUFFIX=_UAT" >> $GITHUB_ENV
+            export ENV_SUFFIX=_UAT
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
             echo "ENV_SUFFIX=_PROD" >> $GITHUB_ENV
+            export ENV_SUFFIX=_PROD
           else
             echo "No matching database for this merge. Skipping deployment."
             exit 0
@@ -104,6 +106,7 @@ jobs:
           SNOWFLAKE_DATABASES: ${{ env.SNOWFLAKE_DATABASES }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+          ENV_SUFFIX: ${{ env.ENV_SUFFIX }}
         run: |
           if [ ! -f sql_to_db_mapping.txt ] || [ ! -s sql_to_db_mapping.txt ]; then
             echo "No changed SQL files found. Exiting."
