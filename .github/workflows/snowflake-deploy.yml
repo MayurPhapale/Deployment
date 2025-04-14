@@ -160,18 +160,23 @@ jobs:
                       statements.append(stmt + ';')
               
               return statements
-          def log_deployment(cursor, script_name, user, database, status, error):
-              cursor.execute(f"USE DATABASE {database};")
+          from datetime import datetime
+
+          def log_deployment(cursor, script_name, user, database, status, error, audit_db):
+              cursor.execute(f"USE DATABASE {audit_db};")
               cursor.execute("""
-                  INSERT INTO AUDIT.DEPLOYMENT_AUDIT (SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE)
-                  VALUES (%s, %s, %s, %s, %s);
-              """, (
-                  script_name,
-                  user,
-                  database,
-                  status,
-                  error if error else None
-              ))
+                  INSERT INTO AUDIT.DEPLOYMENT_AUDIT (
+                      DATETIME, SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE
+                  )
+                  VALUES (%(datetime)s, %(script_name)s, %(user)s, %(database)s, %(status)s, %(error)s)
+              """, {
+                  'datetime': datetime.utcnow(),
+                  'script_name': script_name,
+                  'user': user,
+                  'database': database,
+                  'status': status,
+                  'error': error or None
+              })
 
           def execute_sql_file(cursor, sql_file, database):
               """Execute a SQL file that may contain multiple statements"""
@@ -214,7 +219,7 @@ jobs:
           for database, sql_file in sql_mappings:
               success, error_msg = execute_sql_file(cursor, sql_file, database)
               status = "SUCCESS" if success else "FAIL"
-              log_deployment(cursor, sql_file, user, database, status, error_msg)
+              log_deployment(cursor, sql_file, user, database, status, error_msg,audit_db)
               if success:
                   success_count += 1
                   print(f"✅ Successfully executed {sql_file}")
