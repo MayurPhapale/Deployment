@@ -49,12 +49,13 @@ jobs:
           BRANCH_NAME=${{ github.event.pull_request.head.ref }}
           TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
-            ENV_SUFFIX="_UAT"
+            echo "ENV_SUFFIX=_UAT" >> $GITHUB_ENV
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
-            ENV_SUFFIX="_PROD"
+            echo "ENV_SUFFIX=_PROD" >> $GITHUB_ENV
           else
             echo "No matching database for this merge. Skipping deployment."
             exit 0
+
           fi
           get_database_name() {
             local folder=$1
@@ -159,18 +160,23 @@ jobs:
                       statements.append(stmt + ';')
               
               return statements
-          def log_deployment(cursor, script_name, user, database, status, error):
-              cursor.execute(f"USE DATABASE {database};")
+          from datetime import datetime
+
+          def log_deployment(cursor, script_name, user, database, status, error, audit_db):
+              cursor.execute(f"USE DATABASE {audit_db};")
               cursor.execute("""
-                  INSERT INTO AUDIT.DEPLOYMENT_AUDIT (SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE)
-                  VALUES (%s, %s, %s, %s, %s);
-              """, (
-                  script_name,
-                  user,
-                  database,
-                  status,
-                  error if error else None
-              ))
+                  INSERT INTO AUDIT.DEPLOYMENT_AUDIT (
+                      DATETIME, SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE
+                  )
+                  VALUES (%(datetime)s, %(script_name)s, %(user)s, %(database)s, %(status)s, %(error)s)
+              """, {
+                  'datetime': datetime.utcnow(),
+                  'script_name': script_name,
+                  'user': user,
+                  'database': database,
+                  'status': status,
+                  'error': error or None
+              })
 
           def execute_sql_file(cursor, sql_file, database):
               """Execute a SQL file that may contain multiple statements"""
@@ -202,12 +208,18 @@ jobs:
           success_count = 0
           failure_count = 0
           failed_files = []
-          
+          env_suffix = os.getenv('ENV_SUFFIX', '')
+          if not env_suffix:
+              print("❌ ENV_SUFFIX not set. Exiting.")
+              sys.exit(1)
+          audit_db = f"DA_UDP{env_suffix}"
+          print(f"✅ Using audit database: {audit_db}")
+
           # Process files in order they appear in the file
           for database, sql_file in sql_mappings:
               success, error_msg = execute_sql_file(cursor, sql_file, database)
               status = "SUCCESS" if success else "FAIL"
-              log_deployment(cursor, sql_file, user, database, status, error_msg)
+              log_deployment(cursor, sql_file, user, database, status, error_msg,audit_db)
               if success:
                   success_count += 1
                   print(f"✅ Successfully executed {sql_file}")
