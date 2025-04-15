@@ -16,7 +16,7 @@ on:
 
 jobs:
   deploy_to_snowflake:
-    if: github.event_name == 'workflow_dispatch'
+    # Removed the conditional check to ensure workflow is always available
     runs-on: ubuntu-latest
 
     steps:
@@ -37,6 +37,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff jq
+          
       - name: Get changed SQL files in Sorted order
         id: changed-files
         run: |
@@ -53,25 +54,31 @@ jobs:
           # Save changed SQL files to a text file
           echo "$CHANGED_FILES" > changed_files.txt
           echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
+          
       - name: Determine Databases and Map SQL Files
         id: set-db
         run: |
-          BRANCH_NAME=${{ github.event.inputs.base_branch }}
-          TARGET_BRANCH=${{ github.event.inputs.base_branch }}
-          if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
+          # Print debug info
+          echo "BASE_BRANCH: ${{ github.event.inputs.base_branch }}"
+          echo "COMPARE_BRANCH: ${{ github.event.inputs.compare_branch }}"
+          
+          # Simplified branch detection to handle all cases
+          TARGET_BRANCH="${{ github.event.inputs.base_branch }}"
+          
+          if [[ "$TARGET_BRANCH" == "dev" ]]; then
+            echo "ENV_SUFFIX=_DEV" >> $GITHUB_ENV
+            export ENV_SUFFIX=_DEV
+          elif [[ "$TARGET_BRANCH" == "uat" ]]; then
             echo "ENV_SUFFIX=_UAT" >> $GITHUB_ENV
             export ENV_SUFFIX=_UAT
-          elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
+          elif [[ "$TARGET_BRANCH" == "main" ]]; then
             echo "ENV_SUFFIX=_PROD" >> $GITHUB_ENV
             export ENV_SUFFIX=_PROD
-          elif [[ "$BRANCH_NAME" == dev_release* ]] && [[ "$TARGET_BRANCH" == "dev" ]]; then
-            echo "ENV_SUFFIX=_DEV" >> $GITHUB_ENV
-            export ENV_SUFFIX=_DEV  
           else
-            echo "No matching database for this merge. Skipping deployment."
+            echo "No matching database for this target branch ($TARGET_BRANCH). Skipping deployment."
             exit 0
-
           fi
+          
           get_database_name() {
             local folder=$1
             case $folder in
@@ -85,6 +92,7 @@ jobs:
               *) echo "" ;;
             esac
           }
+          
           DATABASES=""
           echo "" > sql_to_db_mapping.txt
           while IFS= read -r FILE; do
@@ -96,11 +104,13 @@ jobs:
               echo "$DB_NAME:$FILE" >> sql_to_db_mapping.txt
             fi
           done < changed_files.txt
+          
           DATABASES=$(echo "$DATABASES" | sort -u)
           if [[ -z "$DATABASES" ]]; then
             echo "No valid databases found for deployment. Exiting."
             exit 0
           fi
+          
           echo "Selected Databases:"
           echo "$DATABASES"
           echo "$DATABASES" > databases.txt
@@ -109,6 +119,7 @@ jobs:
       - name: Debug ENV_SUFFIX
         run: |
           echo "DEBUG: ENV_SUFFIX is $ENV_SUFFIX"
+          
       - name: Deploy changed SQL files to Snowflake
         if: ${{ env.sql_files != '' }}
         env:
