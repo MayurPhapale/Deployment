@@ -1,15 +1,22 @@
 name: Snowflake Deployment
-
+# Trigger fix
 on:
-  pull_request:
-    types: [closed]
-    branches:
-      - main
-      - uat  # Added for UAT deployments
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (e.g., preprod, uat, prod)"
+        required: true
+        default: preprod
+      base_branch:
+        description: "Base branch to compare (e.g., uat)"
+        required: true
+      compare_branch:
+        description: "Compare branch to compare against base (e.g., uat_release)"
+        required: true
 
 jobs:
   deploy_to_snowflake:
-    if: github.event.pull_request.merged == true
+    # Removed the conditional check to ensure workflow is always available
     runs-on: ubuntu-latest
 
     steps:
@@ -30,44 +37,89 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install snowflake-connector-python sqlfluff jq
-
-      - name: Get changed files
+          
+      - name: Get changed SQL files in Sorted order
         id: changed-files
         run: |
-          BASE_SHA=${{ github.event.pull_request.base.sha }}
-          HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA)
-
-          echo "Changed files:"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+              git fetch origin ${{ github.event.inputs.base_branch }} ${{ github.event.inputs.compare_branch }}
+              BASE_SHA=$(git rev-parse origin/${{ github.event.inputs.base_branch }})
+              HEAD_SHA=$(git rev-parse origin/${{ github.event.inputs.compare_branch }})
+            fi
+            
+          # Get files in sorted manner
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
+          echo "Changed SQL files:"
           echo "$CHANGED_FILES"
-
-          SQL_FILES=$(echo "$CHANGED_FILES" | grep -E '^scm_dm/.*\.sql$' || true)
+          # Save changed SQL files to a text file
+          echo "$CHANGED_FILES" > changed_files.txt
+          echo "sql_files=$(echo "$CHANGED_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
           
-          echo "Changed SQL files in scm_dm:"
-          echo "$SQL_FILES"
-
-          echo "$SQL_FILES" > changed_files.txt
-          echo "sql_files=$(echo "$SQL_FILES" | tr '\n' ' ')" >> $GITHUB_ENV
-
-      - name: Determine Database Name
+      - name: Determine Databases and Map SQL Files
         id: set-db
         run: |
-          BRANCH_NAME=${{ github.event.pull_request.head.ref }}
-          TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
-          DB_NAME=""
-
-          if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
-            DB_NAME="da_scm_uat"
-          elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
-            DB_NAME="da_scm_prod"
+          # Print debug info
+          echo "BASE_BRANCH: ${{ github.event.inputs.base_branch }}"
+          echo "COMPARE_BRANCH: ${{ github.event.inputs.compare_branch }}"
+          
+          # Simplified branch detection to handle all cases
+          TARGET_BRANCH="${{ github.event.inputs.base_branch }}"
+          
+          if [[ "$TARGET_BRANCH" == "dev" ]]; then
+            echo "ENV_SUFFIX=_DEV" >> $GITHUB_ENV
+            export ENV_SUFFIX=_DEV
+          elif [[ "$TARGET_BRANCH" == "uat" ]]; then
+            echo "ENV_SUFFIX=_UAT" >> $GITHUB_ENV
+            export ENV_SUFFIX=_UAT
+          elif [[ "$TARGET_BRANCH" == "main" ]]; then
+            echo "ENV_SUFFIX=_PROD" >> $GITHUB_ENV
+            export ENV_SUFFIX=_PROD
           else
-            echo "No matching database for this merge. Skipping deployment."
+            echo "No matching database for this target branch ($TARGET_BRANCH). Skipping deployment."
             exit 0
           fi
+          
+          get_database_name() {
+            local folder=$1
+            case $folder in
+              com_dm) echo "DA_COM" ;;
+              fin_dm) echo "DA_FIN" ;;
+              mfg_dm) echo "DA_MFG" ;;
+              mrkt_dm) echo "DA_MRKT" ;;
+              prc_dm) echo "DA_PRC" ;;
+              scm_dm) echo "DA_SCM" ;;
+              udp) echo "DA_UDP" ;;
+              *) echo "" ;;
+            esac
+          }
+          
+          DATABASES=""
+          echo "" > sql_to_db_mapping.txt
+          while IFS= read -r FILE; do
+            FOLDER=$(echo "$FILE" | cut -d'/' -f1)
+            DB_NAME=$(get_database_name "$FOLDER")
+            if [[ -n "$DB_NAME" ]]; then
+              DB_NAME="${DB_NAME}${ENV_SUFFIX}"
+              DATABASES+="${DB_NAME}"$'\n'
+              echo "$DB_NAME:$FILE" >> sql_to_db_mapping.txt
+            fi
+          done < changed_files.txt
+          
+          DATABASES=$(echo "$DATABASES" | sort -u)
+          if [[ -z "$DATABASES" ]]; then
+            echo "No valid databases found for deployment. Exiting."
+            exit 0
+          fi
+          
+          echo "Selected Databases:"
+          echo "$DATABASES"
+          echo "$DATABASES" > databases.txt
+          echo "SNOWFLAKE_DATABASES=$(echo "$DATABASES" | tr '\n' ' ')" >> $GITHUB_ENV
 
-          echo "Selected Database: $DB_NAME"
-          echo "SNOWFLAKE_DATABASE=$DB_NAME" >> $GITHUB_ENV
-
+      - name: Debug ENV_SUFFIX
+        run: |
+          echo "DEBUG: ENV_SUFFIX is $ENV_SUFFIX"
+          
       - name: Deploy changed SQL files to Snowflake
         if: ${{ env.sql_files != '' }}
         env:
@@ -75,59 +127,153 @@ jobs:
           SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-          SNOWFLAKE_DATABASE: ${{ env.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_DATABASES: ${{ env.SNOWFLAKE_DATABASES }}
           SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
           SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+          ENV_SUFFIX: ${{ env.ENV_SUFFIX }}
         run: |
-          if [ ! -f changed_files.txt ] || [ ! -s changed_files.txt ]; then
+          if [ ! -f sql_to_db_mapping.txt ] || [ ! -s sql_to_db_mapping.txt ]; then
             echo "No changed SQL files found. Exiting."
             exit 0
           fi
-
           cat > deploy.py << 'EOL'
           import os
           import snowflake.connector
           import sys
-
+          import re
+          
           account = os.getenv('SNOWFLAKE_ACCOUNT')
           user = os.getenv('SNOWFLAKE_USER')
           role = os.getenv('SNOWFLAKE_ROLE')
           warehouse = os.getenv('SNOWFLAKE_WAREHOUSE')
-          database = os.getenv('SNOWFLAKE_DATABASE')
-          schema = os.getenv('SNOWFLAKE_SCHEMA')
-          private_key=os.getenv('SNOWFLAKE_PRIVATE_KEY')
-
+          private_key = os.getenv('SNOWFLAKE_PRIVATE_KEY')
+          
           conn = snowflake.connector.connect(
               account=account,
               user=user,
               private_key=private_key,
               role=role,
-              warehouse=warehouse,
-              database=database,
-              schema=schema
+              warehouse=warehouse
           )
           cursor = conn.cursor()
-
-          with open("changed_files.txt", "r") as f:
-              sql_files = [line.strip() for line in f.readlines() if line.strip()]
-
-          if not sql_files:
+          
+          with open("sql_to_db_mapping.txt", "r") as f:
+              sql_mappings = [line.strip().split(":") for line in f.readlines() if ":" in line]
+          
+          if not sql_mappings:
               print("No SQL files to deploy. Exiting...")
               sys.exit(0)
+          
+          print("Deploying SQL files to respective databases...")
+          
+          def split_sql_statements(sql_content):
+              # Define valid SQL statement starting keywords
+              DDL_DML_KEYWORDS = [
+                  'CREATE', 'ALTER', 'INSERT', 'UPDATE', 'DELETE', 'DROP', 'TRUNCATE',
+                  'MERGE', 'GRANT', 'REVOKE', 'COMMENT', 'REPLACE', 'USE', 'SELECT'
+              ]
+              
+              # Remove multiline comments (/* */)
+              sql_content = re.sub(r'/\*.*?\*/', '', sql_content, flags=re.DOTALL)
+              
+              # Remove single-line comments (-- and #)
+              sql_content = re.sub(r'--.*', '', sql_content)
+              sql_content = re.sub(r'#.*', '', sql_content)
+              
+              # Split content into potential statements
+              raw_statements = sql_content.split(';')
+              
+              # Keep only the valid DDL/DML starting statements
+              statements = []
+              for stmt in raw_statements:
+                  stmt = stmt.strip()
+                  if stmt and any(stmt.upper().startswith(k) for k in DDL_DML_KEYWORDS):
+                      statements.append(stmt + ';')
+              
+              return statements
+          from datetime import datetime
 
-          print(f"Deploying {len(sql_files)} SQL files to database {database}...")
+          def log_deployment(cursor, script_name, user, database, status, error, audit_db):
+              cursor.execute(f"USE DATABASE {audit_db};")
+              cursor.execute("""
+                  INSERT INTO AUDIT.DEPLOYMENT_AUDIT (
+                      SCRIPT_NAME, EXECUTED_BY, TARGET_DATABASE, STATUS, ERROR_MESSAGE
+                  )
+                  VALUES (%(script_name)s, %(user)s, %(database)s, %(status)s, %(error)s)
+              """, {
+                  
+                  'script_name': script_name,
+                  'user': user,
+                  'database': database,
+                  'status': status,
+                  'error': error or None
+              })
 
-          for sql_file in sql_files:
+          def execute_sql_file(cursor, sql_file, database):
+              """Execute a SQL file that may contain multiple statements"""
               try:
+                  cursor.execute(f"USE DATABASE {database};")
                   with open(sql_file, "r") as f:
                       sql_content = f.read()
-                  print(f"Executing {sql_file}...")
-                  cursor.execute(sql_content)
+                  
+                  print(f"Executing {sql_file} on {database}...")
+                  
+                  # Split SQL into individual statements
+                  statements = split_sql_statements(sql_content)
+                  
+                  # Execute each statement separately
+                  for i, statement in enumerate(statements):
+                      if statement.strip():  # Skip empty statements
+                          try:
+                              cursor.execute(statement)
+                              print(f"  ✅ Statement {i+1}/{len(statements)} executed successfully")
+                          except Exception as e:
+                              print(f"  ❌ Error in statement {i+1}/{len(statements)}: {e}")
+                              raise Exception(f"Failed at statement {i+1}/{len(statements)}: {e}")
+                  
+                  return True, None
+                  
               except Exception as e:
-                  print(f"Error executing {sql_file}: {e}")
-                  sys.exit(1)
+                  return False, str(e)
+          
+          success_count = 0
+          failure_count = 0
+          failed_files = []
+          env_suffix = os.getenv('ENV_SUFFIX', '')
+          if not env_suffix:
+              print("❌ ENV_SUFFIX not set. Exiting.")
+              sys.exit(1)
+          audit_db = f"DA_UDP{env_suffix}"
+          print(f"✅ Using audit database: {audit_db}")
 
+          # Process files in order they appear in the file
+          for database, sql_file in sql_mappings:
+              success, error_msg = execute_sql_file(cursor, sql_file, database)
+              status = "SUCCESS" if success else "FAIL"
+              log_deployment(cursor, sql_file, user, database, status, error_msg,audit_db)
+              if success:
+                  success_count += 1
+                  print(f"✅ Successfully executed {sql_file}")
+              else:
+                  failure_count += 1
+                  failed_files.append(f"{sql_file} on {database}: {error_msg}")
+                  # Continue execution instead of exiting
+          
           conn.close()
+          
+          # Print summary
+          print("\n----- DEPLOYMENT SUMMARY -----")
+          print(f"Total files processed: {success_count + failure_count}")
+          print(f"Successfully executed: {success_count}")
+          print(f"Failed: {failure_count}")
+          
+          if failure_count > 0:
+              print("\nFailed files:")
+              for failed in failed_files:
+                  print(f"  - {failed}")
+              sys.exit(1)  # Exit with error code only after attempting all files
+          else:
+              print("\nAll files executed successfully!")
           EOL
           
           python deploy.py
