@@ -1,15 +1,22 @@
 name: Snowflake Deployment
 
 on:
-  pull_request:
-    types: [closed]
-    branches:
-      - main
-      - uat  
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (e.g., preprod, uat, prod)"
+        required: true
+        default: preprod
+      base_branch:
+        description: "Base branch to compare (e.g., uat)"
+        required: true
+      compare_branch:
+        description: "Compare branch to compare against base (e.g., uat_release)"
+        required: true
 
 jobs:
   deploy_to_snowflake:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
 
     steps:
@@ -33,9 +40,12 @@ jobs:
       - name: Get changed SQL files in Sorted order
         id: changed-files
         run: |
-          BASE_SHA=${{ github.event.pull_request.base.sha }}
-          HEAD_SHA=${{ github.event.pull_request.head.sha }}
-          
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+              git fetch origin ${{ github.event.inputs.base_branch }} ${{ github.event.inputs.compare_branch }}
+              BASE_SHA=$(git rev-parse origin/${{ github.event.inputs.base_branch }})
+              HEAD_SHA=$(git rev-parse origin/${{ github.event.inputs.compare_branch }})
+            fi
+            
           # Get files in sorted manner
           CHANGED_FILES=$(git diff --name-only $BASE_SHA $HEAD_SHA | grep '\.sql$' || true)
           echo "Changed SQL files:"
@@ -46,14 +56,17 @@ jobs:
       - name: Determine Databases and Map SQL Files
         id: set-db
         run: |
-          BRANCH_NAME=${{ github.event.pull_request.head.ref }}
-          TARGET_BRANCH=${{ github.event.pull_request.base.ref }}
+          BRANCH_NAME=${{ github.event.inputs.base_branch }}
+          TARGET_BRANCH=${{ github.event.inputs.base_branch }}
           if [[ "$BRANCH_NAME" == uat_release* ]] && [[ "$TARGET_BRANCH" == "uat" ]]; then
             echo "ENV_SUFFIX=_UAT" >> $GITHUB_ENV
             export ENV_SUFFIX=_UAT
           elif [[ "$BRANCH_NAME" == prod_release* ]] && [[ "$TARGET_BRANCH" == "main" ]]; then
             echo "ENV_SUFFIX=_PROD" >> $GITHUB_ENV
             export ENV_SUFFIX=_PROD
+          elif [[ "$BRANCH_NAME" == dev_release* ]] && [[ "$TARGET_BRANCH" == "dev" ]]; then
+            echo "ENV_SUFFIX=_DEV" >> $GITHUB_ENV
+            export ENV_SUFFIX=_DEV  
           else
             echo "No matching database for this merge. Skipping deployment."
             exit 0
