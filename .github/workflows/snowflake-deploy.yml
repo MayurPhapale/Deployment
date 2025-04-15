@@ -1,5 +1,5 @@
 name: Snowflake Deployment
-
+# Trigger fix
 on:
   workflow_dispatch:
     inputs:
